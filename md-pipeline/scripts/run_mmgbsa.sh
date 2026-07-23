@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# @name: run_mmgbsa
+# @description: Schrodinger Prime MMGBSA 逐帧结合自由能(默认后 100ns 每 20 帧)
+# @requires: schrodinger, conda, conda:md
+# @usage: START=1000 END=2000 STEP=20 NJOBS=4 run_mmgbsa.sh <md-dir>...
 # run_mmgbsa.sh — 对已完成的 MD 目录跑薛定谔 thermal_mmgbsa(Prime MMGBSA,默认后 100ns 抽样)
 # ---------------------------------------------------------------------------
 # 从实战沉淀(见 README「MMGBSA 默认关闭」踩坑记录):

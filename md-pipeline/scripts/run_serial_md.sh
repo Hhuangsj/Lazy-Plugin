@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# @name: run_serial_md
+# @description: 串行跑 Desmond MD:自动找空闲 GPU,逐个提交,跑完自动接分析
+# @requires: schrodinger, automd, conda, conda:md
+# @usage: run_serial_md.sh [--gpu N | --gpus 0,2] [--dry-run] [--list FILE]
 #
 # 用法：
 #   cd /data1/home/huangshengjie/workstations/RecA/PEPX_P8P9

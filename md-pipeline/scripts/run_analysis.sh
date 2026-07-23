@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# @name: run_analysis
+# @description: 对已完成的 MD 目录重跑分析(AutoTRJ 聚类 + SID 交互报告)
+# @requires: schrodinger, automd, conda, conda:md
+# @usage: run_analysis.sh <md-dir>...
 # run_analysis.sh — 对已完成的 MD 目录跑轨迹分析(AutoTRJ 聚类 + event_analysis 报告)
 # ---------------------------------------------------------------------------
 # 从实战沉淀:关键修正 = 配体 ASL 用 "res.ptype UNK"(AutoMD 建模时配体即 UNK 残基),

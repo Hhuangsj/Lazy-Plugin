@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# @name: run_plip
+# @description: PLIP 肽-受体相互作用分析,逐帧算类型与残基对占据率(默认后 100ns)
+# @requires: schrodinger, plip, conda, conda:md
+# @usage: LAST_NS=100 JOBS=8 run_plip.sh <md-dir>...
 # run_plip.sh — 对已完成的 MD 目录跑 PLIP 肽–受体相互作用分析(默认后 100ns)
 # ---------------------------------------------------------------------------
 # 从实战沉淀:AutoMD 建模的修饰肽是单个 UNK 残基,PLIP 的 --peptides 肽模式
