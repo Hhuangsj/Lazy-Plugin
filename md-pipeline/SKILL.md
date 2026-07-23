@@ -1,6 +1,6 @@
 ---
 name: md-pipeline
-description: Use when running or analyzing Desmond/Schrödinger molecular dynamics of protein-peptide or protein-ligand systems - serial MD on free GPUs, AutoTRJ clustering, PLIP interaction occupancy, Prime MMGBSA binding free energy, and merged summary tables. Also use when asked about MD trajectory analysis, 结合自由能, 相互作用占据率, or 跑 MD.
+description: Use when running or analyzing Desmond/Schrödinger molecular dynamics of protein-peptide or protein-ligand systems - serial MD on free GPUs, AutoTRJ clustering, PLIP interaction occupancy, Prime MMGBSA binding free energy, and merged summary tables. Also use when asked about MD trajectory analysis, 薛定谔/Desmond 模拟, 轨迹分析, 分析模拟结果, 结合自由能, 相互作用占据率, 聚类构象, or 跑 MD.
 ---
 
 # MD 运行 + 轨迹分析流程
