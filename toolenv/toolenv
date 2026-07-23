@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# toolenv —— 计算化学工具的发现与激活层。
+# 用法见 usage()。设计见 docs/superpowers/specs/2026-07-22-comp-chem-skills-design.md
+set -u
+
+TOOLENV_HOME=${TOOLENV_HOME:-$(dirname "$(readlink -f "$0")")}
+export TOOLENV_HOME
+. "$TOOLENV_HOME/lib/probe.sh"
+. "$TOOLENV_HOME/lib/conda.sh"
+. "$TOOLENV_HOME/lib/cache.sh"
+. "$TOOLENV_HOME/lib/resolve.sh"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: toolenv <command> [args]
+
+  probe [--force]     探测全部工具并写缓存
+  list                列出工具:状态 / 来源 / 路径
+  which <tool>        打印工具根路径
+  check <spec>...     检查依赖是否齐备(spec: <tool> 或 conda:<env>)
+  env <tool>...       打印可 eval 的 export 行
+EOF
+    exit 2
+}
+
+# ---- 探测 ----------------------------------------------------------------
+cmd_probe() {
+    local force=0 tool
+    [ "${1:-}" = "--force" ] && force=1
+    toolenv_load_overrides
+    if [ "$force" = 0 ] && toolenv_cache_load; then
+        return 0
+    fi
+    toolenv_cache_clear
+    while read -r tool; do
+        [ -n "$tool" ] || continue
+        if toolenv_resolve "$tool" 2>/dev/null; then
+            toolenv_cache_put "$tool" found "$TOOLENV_HIT" "$TOOLENV_HIT_SOURCE" "$TOOLENV_HIT_ENV"
+            printf 'found   %-14s %s  [%s]\n' "$tool" "$TOOLENV_HIT" "$TOOLENV_HIT_SOURCE"
+        else
+            toolenv_cache_put "$tool" missing "" "" ""
+            printf 'missing %-14s\n' "$tool"
+        fi
+    done < <(toolenv_list_manifests)
+    toolenv_cache_flush
+}
+
+_ensure_cache() {
+    toolenv_load_overrides
+    toolenv_cache_load 2>/dev/null || cmd_probe >/dev/null
+    toolenv_cache_load 2>/dev/null
+}
+
+# ---- 查询 ----------------------------------------------------------------
+cmd_list() {
+    _ensure_cache
+    printf '%-14s %-8s %-22s %s\n' TOOL STATUS SOURCE PATH
+    local tool
+    while read -r tool; do
+        [ -n "$tool" ] || continue
+        printf '%-14s %-8s %-22s %s\n' \
+            "$tool" \
+            "$(toolenv_cache_get "$tool" STATUS)" \
+            "$(toolenv_cache_get "$tool" SOURCE)" \
+            "$(toolenv_cache_get "$tool" PATH)"
+    done < <(toolenv_cache_tools | sort)
+}
+
+_hint_for() {
+    local tool=$1
+    ( toolenv_load_manifest "$tool" >/dev/null 2>&1 && printf '%s' "$TOOL_HINT" )
+}
+
+cmd_which() {
+    local tool=${1:-}
+    [ -n "$tool" ] || usage
+    _ensure_cache
+    if [ "$(toolenv_cache_get "$tool" STATUS 2>/dev/null)" = "found" ]; then
+        toolenv_cache_get "$tool" PATH
+        return 0
+    fi
+    echo "toolenv: 没找到 $tool。$(_hint_for "$tool")" >&2
+    echo "         纠正路径:在 ${TOOLENV_CONFIG_DIR:-\$HOME/.config/toolenv}/overrides.sh 里设 $(_te_override_var "$tool")=..." >&2
+    return 1
+}
+
+# _check_spec SPEC —— 满足返回 0
+_check_spec() {
+    local spec=$1
+    case "$spec" in
+        conda:*) toolenv_conda_has_env "${spec#conda:}" ;;
+        *)       [ "$(toolenv_cache_get "$spec" STATUS 2>/dev/null)" = "found" ] ;;
+    esac
+}
+
+_spec_hint() {
+    local spec=$1
+    case "$spec" in
+        conda:*) printf 'conda 环境 "%s" 不存在,用 `conda create -n %s` 建' "${spec#conda:}" "${spec#conda:}" ;;
+        *)       _hint_for "$spec" ;;
+    esac
+}
+
+cmd_check() {
+    [ $# -gt 0 ] || usage
+    _ensure_cache
+    local spec rc=0
+    for spec in "$@"; do
+        if ! _check_spec "$spec"; then
+            echo "missing: $spec — $(_spec_hint "$spec")" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+cmd_env() {
+    [ $# -gt 0 ] || usage
+    _ensure_cache
+    cmd_check "$@" || return 1
+    local spec out=""
+    for spec in "$@"; do
+        case "$spec" in
+            conda:*) continue ;;   # conda 环境由具体工具的 tool_activate 负责激活
+        esac
+        out="$out$(toolenv_activate_lines "$spec" \
+                    "$(toolenv_cache_get "$spec" PATH)" \
+                    "$(toolenv_cache_get "$spec" ENV)")
+"
+    done
+    printf '%s' "$out"
+}
+
+# ---- 分发 ----------------------------------------------------------------
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    probe) cmd_probe "$@" ;;
+    list)  cmd_list "$@" ;;
+    which) cmd_which "$@" ;;
+    check) cmd_check "$@" ;;
+    env)   cmd_env "$@" ;;
+    *)     usage ;;
+esac
