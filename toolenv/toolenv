@@ -9,6 +9,7 @@ export TOOLENV_HOME
 . "$TOOLENV_HOME/lib/conda.sh"
 . "$TOOLENV_HOME/lib/cache.sh"
 . "$TOOLENV_HOME/lib/resolve.sh"
+. "$TOOLENV_HOME/lib/meta.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -19,6 +20,9 @@ usage: toolenv <command> [args]
   which <tool>        打印工具根路径
   check <spec>...     检查依赖是否齐备(spec: <tool> 或 conda:<env>)
   env <tool>...       打印可 eval 的 export 行
+  requires <script>   打印脚本头声明的 @requires
+  index <dir>         把目录里的脚本列成 markdown 表
+  run <script> [args] 检查依赖、激活环境,然后执行脚本
 EOF
     exit 2
 }
@@ -131,6 +135,43 @@ cmd_env() {
     printf '%s' "$out"
 }
 
+# ---- 脚本 ----------------------------------------------------------------
+cmd_requires() {
+    local f=${1:-}
+    [ -n "$f" ] || usage
+    toolenv_meta_requires "$f"
+}
+
+cmd_index() {
+    local dir=${1:-.} f name desc reqs use
+    [ -d "$dir" ] || { echo "toolenv: 不是目录: $dir" >&2; return 1; }
+    echo '| 脚本 | 说明 | 依赖 | 用法 |'
+    echo '|------|------|------|------|'
+    for f in "$dir"/*; do
+        [ -f "$f" ] || continue
+        name=$(toolenv_meta_get "$f" name) || continue
+        desc=$(toolenv_meta_get "$f" description) || desc=""
+        reqs=$(toolenv_meta_requires "$f")
+        use=$(toolenv_meta_get "$f" usage) || use=""
+        printf '| %s | %s | %s | `%s` |\n' "$name" "$desc" "$reqs" "$use"
+    done
+}
+
+cmd_run() {
+    local script=${1:-}
+    [ -n "$script" ] || usage
+    shift
+    local reqs
+    reqs=$(toolenv_meta_requires "$script")
+    if [ -n "$reqs" ]; then
+        # shellcheck disable=SC2086
+        cmd_check $reqs || return 1
+        # shellcheck disable=SC2086
+        eval "$(cmd_env $reqs)"
+    fi
+    exec "$script" "$@"
+}
+
 # ---- 分发 ----------------------------------------------------------------
 cmd=${1:-}
 [ $# -gt 0 ] && shift
@@ -140,5 +181,8 @@ case "$cmd" in
     which) cmd_which "$@" ;;
     check) cmd_check "$@" ;;
     env)   cmd_env "$@" ;;
+    requires) cmd_requires "$@" ;;
+    index)    cmd_index "$@" ;;
+    run)      cmd_run "$@" ;;
     *)     usage ;;
 esac
