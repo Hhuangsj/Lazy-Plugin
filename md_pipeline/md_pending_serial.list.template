@@ -1,0 +1,17 @@
+# md_pending_serial.list —— 串行 MD 待办清单模板
+# ===========================================================================
+# 用法:复制到 MD 工作目录并改名为 md_pending_serial.list,与 .mae 输入放一起。
+#   cp md_pending_serial.list.template /path/to/workdir/md_pending_serial.list
+#
+# 规则:
+#   - 每行一个 .mae 输入文件名(相对工作目录,不写路径)。
+#   - 以 # 开头的行、空行会被忽略;行内 # 之后的内容当注释。
+#   - 顺序执行:自动找空闲 GPU,一个跑完再跑下一个。
+#   - 已完成 / 已有对应 *-md 目录的结构会被自动跳过(可安全重启、可中途追加)。
+#   - 进度自动写到同目录 md_completed_serial.list / md_failed_serial.list。
+# ===========================================================================
+
+# ↓↓↓ 把下面的示例替换成你自己的 .mae 文件名 ↓↓↓
+example_receptorA_ligand-01.mae
+example_receptorA_ligand-02.mae
+example_receptorB_ligand-01.mae      

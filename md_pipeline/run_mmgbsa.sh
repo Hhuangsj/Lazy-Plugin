@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# run_mmgbsa.sh — 对已完成的 MD 目录跑薛定谔 thermal_mmgbsa(Prime MMGBSA,默认后 100ns 抽样)
+# ---------------------------------------------------------------------------
+# 从实战沉淀(见 README「MMGBSA 默认关闭」踩坑记录):
+#   - 配体选择必须 -lig_asl "res.ptype UNK"(与建模一致),否则全帧 "ASL ... 匹配不到原子";
+#   - 不加 -frozen / -atom_asl(CLEAN 后水/离子已删,冻结集会变空集导致读第1帧即中止);
+#     thermal_mmgbsa 默认已删水/膜、分离配体与受体,无需再冻结。
+#   - MMGBSA 每帧一次 Prime 能量计算,很贵。默认只取最后 LAST_NS ns、每 STEP 帧抽一帧。
+# 帧号约定:与轨迹 0-based 索引一致。200ns/2001帧(0.1ns/帧)时,后 100ns = 帧 1000..2000。
+#
+# 用法:
+#   ./run_mmgbsa.sh MD_DIR [MD_DIR ...]
+#   START=1000 END=2000 STEP=20 NJOBS=8 ./run_mmgbsa.sh dir1     # 覆盖默认
+#   LIG_ASL='res.ptype UNK' ./run_mmgbsa.sh dir1
+# ---------------------------------------------------------------------------
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/env.sh"
+md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
+
+# ===== 可覆盖参数(默认:后 100ns,每 20 帧一帧 ≈ 51 帧)=====
+LIG_ASL="${LIG_ASL:-res.ptype UNK}"
+START="${START:-1000}"     # 起始帧(0-based);后 100ns 起点
+END="${END:-2000}"         # 结束帧
+STEP="${STEP:-20}"         # 每 N 帧抽一帧
+# NJOBS = 把帧切成几个 Prime 子作业,且下面 -HOST 用 localhost:$NJOBS 让它们并发。
+# => NJOBS=8 时 8 个子作业同时跑 = 8 核。真正决定并发的是 -HOST 的 ":N",不是 hosts
+#    的 processors(见 README 踩坑记录 7)。要几核就把 NJOBS 设几。
+NJOBS="${NJOBS:-8}"
+OUT_NAME="${OUT_NAME:-mmgbsa_last100ns}"
+
+[ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
+
+run_one() {
+    local dir; dir="$(cd "$1" 2>/dev/null && pwd)" || { echo "ERROR: 目录无效: $1"; return 1; }
+    # 自动探测主 -out.cms(排除 PL_Analysis* 与 *_N-out.cms);不假设文件夹名==文件名。
+    local cms; cms="$(ls "$dir"/*-out.cms 2>/dev/null | grep -v PL_Analysis | grep -vE '_[0-9]+-out\.cms$' | head -1)"
+    [ -n "$cms" ] || { echo "ERROR: $dir 下找不到主 -out.cms,跳过。"; return 1; }
+    local name; name="$(basename "$cms")"; name="${name%-out.cms}"
+    local out="$dir/$OUT_NAME"
+    echo "==================== $(date '+%F %T') MMGBSA START $name ===================="
+    rm -rf "$out"; mkdir -p "$out"
+    # 关键:-HOST 必须带处理器数 localhost:N 才会并发!thermal_mmgbsa 把命令行 -HOST
+    # 原样传给 prime_mmgbsa;只写 "localhost"(或不写)= 1 slot => 子作业串行(Max:1)。
+    # 写 "localhost:N" 才会同时跑 N 个子作业 = N 核。仅在 hosts 里设 processors 无效。
+    ( cd "$out" && "$SCHRODINGER/run" thermal_mmgbsa.py "$cms" \
+        -lig_asl "$LIG_ASL" -j "$name" \
+        -start_frame "$START" -end_frame "$END" -step_size "$STEP" \
+        -NJOBS "$NJOBS" -HOST "localhost:$NJOBS" )
+    local rc=$?
+    echo "  -> ${out}/${name}-prime-out.csv"
+    echo "==================== $(date '+%F %T') MMGBSA DONE $name (rc=$rc) ===================="
+    echo
+}
+
+for d in "$@"; do ( run_one "$d" ); done
+echo "########## MMGBSA ALL DONE $(date '+%F %T') ##########"

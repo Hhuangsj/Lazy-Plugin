@@ -1,0 +1,12 @@
+[2026-07-22 07:03:05] Starting INT-001553-target.mae on GPU 2.
+[2026-07-22 07:03:05] Running analysis in /data1/home/huangshengjie/workstations/TSLP/From-Prasanna/INT-001553-target-XXXX-md.
+[2026-07-22 07:03:05] DRY-RUN: would record INT-001553-target.mae in /data1/home/huangshengjie/workstations/TSLP/From-Prasanna/md_completed_553.list.
+[2026-07-22 07:03:05] Completed INT-001553-target.mae.
+[2026-07-22 07:03:22] GPU 2 stable free check 1/3: util=0%, mem=4MiB.
+[2026-07-22 07:03:22] GPU 3 stable free check 1/3: util=0%, mem=4MiB.
+[2026-07-22 07:05:03] GPU 3 stable free check 2/3: util=0%, mem=4MiB.
+[2026-07-22 07:05:03] GPU 2 stable free check 2/3: util=0%, mem=4MiB.
+[2026-07-22 07:06:43] GPU 2 stable free check 3/3: util=0%, mem=4MiB.
+[2026-07-22 07:06:43] Starting INT-001553-target.mae on GPU 2.
+[2026-07-22 07:06:43] GPU 3 stable free check 3/3: util=0%, mem=4MiB.
+[2026-07-22 07:06:43] Starting INT-001554-target.mae on GPU 3.
