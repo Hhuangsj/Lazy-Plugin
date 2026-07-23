@@ -23,6 +23,7 @@ usage: toolenv <command> [args]
   requires <script>   打印脚本头声明的 @requires
   index <dir>         把目录里的脚本列成 markdown 表
   run <script> [args] 检查依赖、激活环境,然后执行脚本
+  selftest            在干净环境里自检
 EOF
     exit 2
 }
@@ -172,6 +173,22 @@ cmd_run() {
     exec "$script" "$@"
 }
 
+cmd_selftest() {
+    echo "== clean-env probe(env -i,验证不依赖交互式 .bashrc)"
+    env -i HOME="$HOME" PATH="/usr/bin:/bin" \
+        TOOLENV_HOME="$TOOLENV_HOME" \
+        ${TOOLENV_TOOLS_DIR:+TOOLENV_TOOLS_DIR="$TOOLENV_TOOLS_DIR"} \
+        ${TOOLENV_CACHE_DIR:+TOOLENV_CACHE_DIR="$TOOLENV_CACHE_DIR"} \
+        ${TOOLENV_CONFIG_DIR:+TOOLENV_CONFIG_DIR="$TOOLENV_CONFIG_DIR"} \
+        bash "$TOOLENV_HOME/toolenv" probe --force || {
+            echo "selftest: 干净环境里 probe 失败" >&2; return 1; }
+    echo
+    echo "== list"
+    "$TOOLENV_HOME/toolenv" list || return 1
+    echo
+    echo "selftest OK(工具 missing 不算失败,照上表补装即可)"
+}
+
 # ---- 分发 ----------------------------------------------------------------
 cmd=${1:-}
 [ $# -gt 0 ] && shift
@@ -184,5 +201,6 @@ case "$cmd" in
     requires) cmd_requires "$@" ;;
     index)    cmd_index "$@" ;;
     run)      cmd_run "$@" ;;
+    selftest) cmd_selftest "$@" ;;
     *)     usage ;;
 esac

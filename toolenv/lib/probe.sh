@@ -41,15 +41,24 @@ try_cmd() {
     _te_hit "$p" "path:$cmd"
 }
 
-# try_glob PATTERN... —— 逐个 glob,同一 pattern 内按版本号取最大的目录
+# try_glob [--require RELPATH] PATTERN...
+#   逐个 glob,同一 pattern 内按版本号取最大的目录。
+#   --require:候选目录里必须存在该相对路径才算数 —— 用来把"安装包解压目录"
+#   之类的赝品挡掉(实测:~/software/Schrodinger/ 下 schrodinger2023-4-linux
+#   是安装包目录,没有 run,真安装是 2023-4)。
 try_glob() {
     [ -n "$TOOLENV_HIT" ] && return 0
-    local pat d best
+    local pat d best require=""
+    if [ "${1:-}" = "--require" ]; then
+        require=$2
+        shift 2
+    fi
     for pat in "$@"; do
         best=""
         # 有意不加引号:这里就是要 glob 展开
         for d in $pat; do
             [ -d "$d" ] || continue
+            [ -n "$require" ] && [ ! -e "$d/$require" ] && continue
             if [ -z "$best" ]; then
                 best=$d
             else

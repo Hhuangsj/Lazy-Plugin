@@ -5,7 +5,7 @@ tool_detect() {
     try_env TOOLENV_AUTOMD_BUNDLED      # skill 内置副本,优先
     try_env AUTOMD_DIR
     try_cmd AutoTRJ --up 1
-    try_glob "$HOME/software/AutoMD" "$HOME/AutoMD" "/opt/AutoMD"
+    try_glob --require AutoTRJ "$HOME/software/AutoMD" "$HOME/AutoMD" "/opt/AutoMD"
 }
 tool_activate() {
     local root=$1

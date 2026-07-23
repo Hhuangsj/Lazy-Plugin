@@ -4,7 +4,9 @@ TOOL_HINT="需要已授权的 Schrödinger 安装;装好后 export SCHRODINGER=/
 tool_detect() {
     try_env SCHRODINGER
     try_cmd maestro --up 2
-    try_glob "$HOME/software/Schrodinger/*" \
+    # --require run:挡掉安装包解压目录(那种目录没有 run)
+    try_glob --require run \
+             "$HOME/software/Schrodinger/*" \
              "$HOME/Schrodinger/*" \
              "/opt/schrodinger/*" \
              "/opt/Schrodinger/*" \

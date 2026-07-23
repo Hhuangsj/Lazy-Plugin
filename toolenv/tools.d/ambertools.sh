@@ -5,7 +5,7 @@ tool_detect() {
     try_env AMBERHOME
     try_cmd antechamber --up 2
     try_conda_env_bin antechamber
-    try_glob "$HOME/software/amber*" "$HOME/amber*" "/opt/amber*"
+    try_glob --require bin/antechamber "$HOME/software/amber*" "$HOME/amber*" "/opt/amber*"
 }
 tool_activate() {
     local root=$1 cenv=${2:-}

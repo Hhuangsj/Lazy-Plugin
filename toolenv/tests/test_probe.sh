@@ -69,6 +69,33 @@ test_try_glob_ignores_files_and_missing() {
     assert_fail try_glob "$SANDBOX/notadir" "$SANDBOX/nothing-here-*"
 }
 
+test_try_glob_require_skips_dirs_without_marker() {
+    # 真实场景:~/software/Schrodinger/ 下既有真安装 2023-4(含 run),
+    # 又有安装包目录 schrodinger2023-4-linux(无 run)。必须挑前者。
+    _reset
+    mkdir -p "$SANDBOX/S/2023-4" "$SANDBOX/S/schrodinger2023-4-linux"
+    printf '#!/bin/sh\n' > "$SANDBOX/S/2023-4/run"
+    chmod +x "$SANDBOX/S/2023-4/run"
+    assert_ok try_glob --require run "$SANDBOX/S/*"
+    assert_eq "$TOOLENV_HIT" "$SANDBOX/S/2023-4"
+}
+
+test_try_glob_require_still_prefers_highest_version() {
+    _reset
+    mkdir -p "$SANDBOX/S/2023-4" "$SANDBOX/S/2024-1"
+    printf '#!/bin/sh\n' > "$SANDBOX/S/2023-4/run"
+    printf '#!/bin/sh\n' > "$SANDBOX/S/2024-1/run"
+    chmod +x "$SANDBOX/S/2023-4/run" "$SANDBOX/S/2024-1/run"
+    assert_ok try_glob --require run "$SANDBOX/S/*"
+    assert_eq "$TOOLENV_HIT" "$SANDBOX/S/2024-1"
+}
+
+test_try_glob_require_fails_when_no_candidate_qualifies() {
+    _reset
+    mkdir -p "$SANDBOX/S/installer-only"
+    assert_fail try_glob --require run "$SANDBOX/S/*"
+}
+
 test_first_hit_wins() {
     _reset
     mkdir -p "$SANDBOX/first" "$SANDBOX/second"
