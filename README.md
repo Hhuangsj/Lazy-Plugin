@@ -1,11 +1,11 @@
-# 计算化学 / 办公 Skill 仓库(lazy-skills)
+# 计算化学 / 办公 Skill 仓库(Lazy-Plugin)
 
 Claude Code skill 的集合,按「域」分类:`skills/science/`(计算化学 / AIDD)、
 `skills/office/`(日常办公,占位待填)。底下垫一个工具发现层 `toolenv`。目标是:
 同一套脚本放到任意机器上,自己找到 Schrödinger / AutoMD / conda / AmberTools /
 RDKit,不用改仓库里任何文件。
 
-marketplace 名字是 `lazy-skills`(见 `.claude-plugin/marketplace.json`),下面
+marketplace 名字是 `lazy-plugin`(见 `.claude-plugin/marketplace.json`),下面
 挂两个 plugin:`science`、`office`,一个域一个 plugin。
 
 ## 装
@@ -16,8 +16,8 @@ symlink 和 plugin 缓存并存;`install.sh` 检测到会告警,让你二选一)
 ### 开发态(本机开发这个仓库,改文件立即生效)
 
 ```bash
-git clone git@github.com:Hhuangsj/skills.git
-cd skills
+git clone git@github.com:Hhuangsj/Lazy-Plugin.git
+cd Lazy-Plugin
 ./install.sh
 ```
 
@@ -28,11 +28,11 @@ symlink 到 `~/.claude/skills/`,然后探测一遍工具并打印结果表。改
 ### 分发态(别人的机器,只想用,不改仓库)
 
 ```
-/plugin marketplace add Hhuangsj/skills
-/plugin install science@lazy-skills
+/plugin marketplace add Hhuangsj/Lazy-Plugin
+/plugin install science@lazy-plugin
 ```
 
-办公域同理:`/plugin install office@lazy-skills`。这种装法走 Claude Code 的
+办公域同理:`/plugin install office@lazy-plugin`。这种装法走 Claude Code 的
 plugin 缓存,不感知本地仓库改动;要更新就重新 `/plugin install`。
 
 路径不对就写 `~/.config/toolenv/overrides.sh`,别改仓库:

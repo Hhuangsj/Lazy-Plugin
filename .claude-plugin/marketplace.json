@@ -1,5 +1,5 @@
 {
-  "name": "lazy-skills",
+  "name": "lazy-plugin",
   "owner": { "name": "huangshengjie" },
   "metadata": { "description": "计算化学 / AIDD / 办公 自用 skill 集" },
   "plugins": [
