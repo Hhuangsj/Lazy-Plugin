@@ -84,7 +84,10 @@ toolenv selftest             # 干净环境自检(不依赖交互式 .bashrc)
 # @description: 一句话
 # @requires: gromacs, conda:md
 # @usage: run_gmx.sh <dir>...
-source "$(dirname "$0")/../../../../toolenv/activate.sh"
+# 定位并激活依赖(向上找 toolenv,兼容 install.sh symlink 与 /plugin 安装)
+_here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd); _r=${CLAUDE_PLUGIN_ROOT:-$_here}
+while [ "$_r" != / ] && [ ! -f "$_r/toolenv/activate.sh" ]; do _r=$(dirname "$_r"); done
+source "$_r/toolenv/activate.sh"
 ```
 
 `toolenv index <dir>` 会读脚本头元信息自动收录成表,不用另外登记。
