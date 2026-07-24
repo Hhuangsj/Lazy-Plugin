@@ -6,8 +6,21 @@
 #
 # 本文件被 source,不用 set -e;失败用 WARN/ERROR 提示,不中断调用方。
 
-MD_PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_TOOLENV="$(cd "$MD_PIPELINE_DIR/../../toolenv" 2>/dev/null && pwd)/toolenv"
+MD_PIPELINE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# 定位 toolenv:先找 find-toolenv.sh(bootstrap:CLAUDE_PLUGIN_ROOT 或向上找),
+# 再用 te_find_toolenv 走完整优先级(含 TOOLENV_BIN 覆盖)。换机器/移动目录都不用改本文件。
+_te_boot=${CLAUDE_PLUGIN_ROOT:-$MD_PIPELINE_DIR}
+while [ "$_te_boot" != "/" ] && [ ! -f "$_te_boot/toolenv/find-toolenv.sh" ]; do
+    _te_boot=$(dirname "$_te_boot")
+done
+if [ -f "$_te_boot/toolenv/find-toolenv.sh" ]; then
+    . "$_te_boot/toolenv/find-toolenv.sh"
+    _TOOLENV=$(te_find_toolenv "$MD_PIPELINE_DIR") || _TOOLENV=""
+else
+    _TOOLENV=""
+fi
+unset _te_boot
 
 # skill 内置的 AutoMD 副本优先于系统安装
 export TOOLENV_AUTOMD_BUNDLED="$MD_PIPELINE_DIR/AutoMD"
