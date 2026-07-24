@@ -13,8 +13,9 @@ description: Use when running or analyzing Desmond/Schrödinger molecular dynami
 
 ```bash
 SKILL=~/.claude/skills/md-pipeline
-TOOLENV=$(readlink -f "$SKILL")/../toolenv/toolenv
-$TOOLENV check schrodinger automd conda conda:md
+REPO=$(readlink -f "$SKILL"); while [ "$REPO" != / ] && [ ! -x "$REPO/toolenv/toolenv" ]; do REPO=$(dirname "$REPO"); done
+TOOLENV="$REPO/toolenv/toolenv"
+"$TOOLENV" check schrodinger automd conda conda:md
 ```
 
 缺什么会直接说缺什么、怎么装。路径不对就写 `~/.config/toolenv/overrides.sh`
@@ -87,7 +88,10 @@ MMGBSA 的并行取决于 `-HOST localhost:N` 而非 `-NJOBS`(7);重跑分析前
 # @description: 一句话说明
 # @requires: gromacs, conda:md
 # @usage: run_gmx.sh <dir>...
-source "$(dirname "$0")/../../toolenv/activate.sh"
+# 定位并激活依赖(向上找 toolenv,兼容 install.sh symlink 与 /plugin 安装)
+_here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd); _r=${CLAUDE_PLUGIN_ROOT:-$_here}
+while [ "$_r" != / ] && [ ! -f "$_r/toolenv/activate.sh" ]; do _r=$(dirname "$_r"); done
+source "$_r/toolenv/activate.sh"
 ```
 
 `activate.sh` 会读上面的 `@requires`,检查并激活;缺依赖时直接报出缺什么并退出。
