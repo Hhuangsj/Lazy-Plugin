@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 TESTS_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 SKILL_DIR=$(dirname "$TESTS_DIR")
-REPO=$(dirname "$SKILL_DIR")
+REPO=$SKILL_DIR
+while [ "$REPO" != "/" ] && [ ! -d "$REPO/toolenv" ]; do REPO=$(dirname "$REPO"); done
 REAL_HOME=$HOME
 export REAL_HOME
 . "$REPO/toolenv/tests/helpers.sh"

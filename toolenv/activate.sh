@@ -1,5 +1,7 @@
-# activate.sh —— 被脚本 source 的一行入口:
-#     source "$(dirname "$0")/../../toolenv/activate.sh"
+# activate.sh —— 被脚本 source 的入口。用向上查找定位,不要硬编码相对层级:
+#     _here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd); _r=${CLAUDE_PLUGIN_ROOT:-$_here}
+#     while [ "$_r" != / ] && [ ! -f "$_r/toolenv/activate.sh" ]; do _r=$(dirname "$_r"); done
+#     source "$_r/toolenv/activate.sh"
 # 读调用方脚本头的 @requires,检查并激活;缺依赖时打印缺什么并 exit 1。
 
 _te_self=$(readlink -f "${BASH_SOURCE[0]}")

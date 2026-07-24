@@ -1,0 +1,21 @@
+{
+  "name": "lazy-skills",
+  "owner": { "name": "huangshengjie" },
+  "metadata": { "description": "计算化学 / AIDD / 办公 自用 skill 集" },
+  "plugins": [
+    {
+      "name": "science",
+      "source": "./",
+      "strict": false,
+      "description": "计算化学与 AIDD:Desmond/薛定谔 MD 模拟、轨迹分析、结合自由能等",
+      "skills": ["./skills/science"]
+    },
+    {
+      "name": "office",
+      "source": "./",
+      "strict": false,
+      "description": "日常办公:文档转换、报表、周报等(占位,待填)",
+      "skills": ["./skills/office"]
+    }
+  ]
+}

@@ -145,6 +145,7 @@ def extract_sampled_frames_schrodinger(
     keep_asl: str = "protein",
     start_idx: int = 0,
     ligand_chain: str = "",
+    ligand_relabel_asl: str = "res.ptype UNK",
 ) -> List[Path]:
     schrodinger_root = os.environ.get("SCHRODINGER", "").strip()
     if not schrodinger_root:
@@ -168,6 +169,7 @@ stride = {int(stride)}
 start_idx = {int(start_idx)}
 keep_asl = {repr(str(keep_asl))}
 ligand_chain = {repr(str(ligand_chain))}
+ligand_relabel_asl = {repr(str(ligand_relabel_asl))}
 
 _msys, cms_model = topo.read_cms(cms)
 trajectory = traj.read_traj(trjdir)
@@ -176,17 +178,27 @@ keep_atoms = analyze.evaluate_asl(fsys_ct, keep_asl)
 if not keep_atoms:
     sys.exit("ASL selected no atoms")
 
+# Positions (1-based, within the extracted structure) of the ligand atoms to
+# relabel. Resolved once on the topology: extract() preserves keep_atoms order.
+relabel_pos = []
+if ligand_chain and ligand_relabel_asl:
+    lig_atoms = set(analyze.evaluate_asl(fsys_ct, ligand_relabel_asl))
+    if not lig_atoms:
+        sys.exit("ligand relabel ASL selected no atoms: " + ligand_relabel_asl)
+    relabel_pos = [i + 1 for i, a in enumerate(keep_atoms) if a in lig_atoms]
+    if not relabel_pos:
+        sys.exit("ligand relabel ASL selected no atoms inside keep_asl")
+
 Path(outdir).mkdir(parents=True, exist_ok=True)
 for idx in range(start_idx, len(trajectory), stride):
     frame = trajectory[idx]
     topo.update_fsys_ct_from_frame_GF(fsys_ct, cms_model, frame)
     out_st = fsys_ct.extract(keep_atoms)
-    if ligand_chain:
-        # Relabel the UNK peptide ligand to its own chain so PLIP/chain
-        # detection can distinguish it from the receptor protein chain(s).
-        for a in out_st.atom:
-            if a.pdbres.strip() == "UNK":
-                a.chain = ligand_chain
+    if relabel_pos:
+        # Relabel the peptide/ligand atoms to their own chain so PLIP/chain
+        # detection can distinguish them from the receptor protein chain(s).
+        for pos in relabel_pos:
+            out_st.atom[pos].chain = ligand_chain
     out_path = Path(outdir) / f"frame_{{idx+1:05d}}.pdb"
     with StructureWriter(str(out_path)) as w:
         w.append(out_st)
@@ -1057,6 +1069,13 @@ def main() -> None:
         help="schrodinger mode: relabel the UNK peptide ligand to this chain id "
              "on export (e.g. 'B'), so it is a distinct chain from the receptor.",
     )
+    parser.add_argument(
+        "--ligand-relabel-asl",
+        default="res.ptype UNK",
+        help="schrodinger mode: ASL picking the atoms moved to --ligand-chain. "
+             "Default matches AutoMD's single-UNK-residue ligand; use e.g. "
+             "'chain.name \" \"' when the peptide is a normal residue chain.",
+    )
     args = parser.parse_args()
     if args.jobs < 1:
         raise ValueError("--jobs must be >= 1.")
@@ -1126,6 +1145,7 @@ def main() -> None:
                 keep_asl=args.schrodinger_keep_asl,
                 start_idx=start_idx,
                 ligand_chain=args.ligand_chain,
+                ligand_relabel_asl=args.ligand_relabel_asl,
             )
         else:
             converted_dir = output_dir / "converted_for_gmx"
