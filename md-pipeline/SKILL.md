@@ -46,11 +46,34 @@ $SCHRODINGER/run $SKILL/scripts/summarize_analysis.py <md-dir>... --out-csv summ
 `run_serial_md.sh` 会把进度写进工作目录的 `md_completed_serial.list` /
 `md_failed_serial.list`,已完成或已有 `*-md` 目录的体系自动跳过,可安全重启。
 
+## 分析前必做:查清配体到底是什么
+
+**所有 `LIGAND_ASL` 默认值都可能不适用于你手上的体系**,选错的表现是配体聚类静默
+失败(日志里 ERROR、退出码却是 0)、MMGBSA 直接拒跑。先看一眼链和残基构成:
+
+```bash
+$SCHRODINGER/run python3 -c "
+from schrodinger.application.desmond.packages import topo
+_, c = topo.read_cms('<体系>-out.cms')
+ch = {}
+for r in c.fsys_ct.residue: ch.setdefault(r.chain, []).append(r.pdbres.strip())
+for k, v in ch.items(): print(repr(k), len(v), sorted(set(v))[:8])"
+```
+
+| 配体形态 | `LIGAND_ASL` | PLIP |
+|---|---|---|
+| 单个 `UNK` 残基(AutoMD 建模的修饰肽) | `res.ptype UNK`(默认) | 配体模式(默认) |
+| 正常氨基酸残基、独立/空白链 | `not chain.name A and not water and not ions` | `PEPTIDE_MODE=1` |
+
+别拿残基编号当配体 ASL —— 同一批体系编号未必一致(详见踩坑 8)。
+
 ## 改参数或出问题之前
 
-**必读** `references/troubleshooting.md` —— 7 条实测踩坑,包括:配体 ASL 必须用
-`res.ptype UNK` 而不是 `ligand`;MMGBSA 的并行取决于 `-HOST localhost:N` 而非 `-NJOBS`;
-PLIP 对「肽=单个 UNK 残基」体系必须走配体模式。这些都是花了时间才定位到的,别重踩。
+**必读** `references/troubleshooting.md` —— 12 条实测踩坑,包括:配体 ASL 选错会静默
+失败、且 `res.ptype UNK` 并非通用默认(8);正常残基肽的 PLIP 要走肽模式(9);
+MMGBSA 的并行取决于 `-HOST localhost:N` 而非 `-NJOBS`(7);重跑分析前要清旧聚类
+产物(11);**别在脚本运行中编辑它**,bash 会读错偏移把正在跑的作业弄崩(12)。
+这些都是花了时间才定位到的,别重踩。
 
 更早的完整说明留在 `references/original-readme.md`。
 

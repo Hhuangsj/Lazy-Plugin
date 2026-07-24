@@ -61,3 +61,69 @@ AutoMD 建模的修饰肽是一整个 `UNK` 残基。PLIP 的 `--peptides <链>`
 >
 > 另一条路(不改单作业):**同时并行启动 N 个体系**,每个 thermal_mmgbsa 各占 1 核 = N 核
 > (P8/P9 那批 4 体系并行 = 4 核就是这么来的)。体系数少、想单个跑满多核时,用 `-HOST localhost:N`。
+
+---
+
+来自 TSLP/From-Prasanna 这批体系(受体 TSLP 在链 A,肽是**正常氨基酸残基**、
+不是 UNK)。这批和 PEPX 那批的建模方式不同,踩到的坑也不同。
+
+### 8. 配体 ASL 不是万能默认值 —— 先看体系,别照抄 `res.ptype UNK`
+`res.ptype UNK` 只对「肽被建成单个 UNK 残基」的 AutoMD 体系成立。TSLP 这批的肽是
+ACE/NME 封端的**正常残基**(ASP/CYS/ILE...),落在**空白链**,于是:
+```
+ERROR: No atoms selected by '-rmsd-asl "( res.ptype UNK )"'    # 配体聚类静默失败
+ERROR: Ligand ASL selection "..." returns zero atoms.           # thermal_mmgbsa 拒跑
+```
+而且 AutoTRJ 把这种失败写进 `PL_Analysis_Ligand*Cluster_*.log` 就**退出码 0**,
+外层看不出错 —— 必须去 `grep -i error PL_Analysis_*.log` 才发现。
+
+**跑分析前先查清配体是什么**:
+```bash
+$SCHRODINGER/run python3 -c "
+from schrodinger.application.desmond.packages import topo
+_, c = topo.read_cms('<体系>-out.cms')
+ch = {}
+for r in c.fsys_ct.residue: ch.setdefault(r.chain, []).append(r.pdbres.strip())
+for k, v in ch.items(): print(repr(k), len(v), sorted(set(v))[:8])"
+```
+然后按体系选:
+| 体系形态 | LIGAND_ASL |
+|---|---|
+| 肽 = 单个 UNK 残基(AutoMD 建模) | `res.ptype UNK` |
+| 肽 = 正常残基、独立/空白链 | `not chain.name A and not water and not ions` |
+
+**别用残基编号**(如 `res.num 63-88`)当通用配体 ASL:同一批里编号未必一致 ——
+INT-001553 的肽编号 63–88,INT-001554 却是 0–16,同一条命令一个能跑一个报零原子。
+按「链 + 非水非离子」选最稳。
+
+### 9. 肽是正常残基链时,PLIP 要走**肽模式**而不是配体模式
+踩坑 5 说的 `--no-plip-peptides`(把 UNK 当配体)只适用于 UNK 体系。正常残基肽走
+配体模式识别不到,要用 PLIP 的 `--peptides`:
+```bash
+LIGAND_ASL='not chain.name A and not water and not ions' \
+KEEP_ASL="chain.name A or ($LIGAND_ASL)" \
+PEPTIDE_MODE=1 LIGAND_CHAIN=B CHAIN_A=B CHAIN_B=A run_plip.sh <dir>
+```
+`run_plip.sh` 的 `PEPTIDE_MODE=1` 就是「不传 `--no-plip-peptides`」。重贴链仍然必要
+(空白链会被链检测忽略),但重贴哪些原子现在由 `LIGAND_ASL` 决定 ——
+`plip_interaction_analysis.py` 新增 `--ligand-relabel-asl`,默认仍是 `res.ptype UNK`,
+老体系行为不变。
+
+### 10. `PL_Analysis_CLEAN_trj` 是中间产物,跑完可删
+AutoTRJ 的链路是 `原始轨迹 → CLEAN(去水去离子) → ALIGN(叠合) → 聚类`。
+聚类和后续分析都读 ALIGN,CLEAN 留着只是占地(每体系 ~55MB)。
+`run_analysis.sh` 现在默认在**等 `$JOB_*` 作业全部离开 jobcontrol 队列后**删掉
+`PL_Analysis_CLEAN_trj` / `PL_Analysis_CLEAN-out.cms`;`KEEP_CLEAN=1` 可保留。
+> 等待是必须的:AutoTRJ `-a` 异步提交(踩坑 3),立刻删会抽掉聚类正在读的轨迹。
+
+### 11. 重跑分析前先清掉上一轮的聚类产物
+聚类输出文件名带成员数(`PL_Analysis_APCluster_5_0_56members-out.cms`),换了 ASL
+重跑会生成**另一套名字**,和上一轮的并排躺在同一目录里,分不清谁是谁。重跑前:
+```bash
+rm -f <dir>/PL_Analysis_*Cluster_*-out.cms
+```
+
+### 12. 别在脚本运行中编辑它
+bash 是按字节偏移边读边执行的。分析跑到一半时改 `drive.sh`,正在跑的那个进程会从
+错位的偏移继续读,报 `syntax error near unexpected token` 然后死掉 —— 表现为
+「明明语法没问题的脚本却挂了」。要改就先复制一份改副本,或等跑完再改。

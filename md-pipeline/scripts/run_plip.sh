@@ -2,7 +2,7 @@
 # @name: run_plip
 # @description: PLIP 肽-受体相互作用分析,逐帧算类型与残基对占据率(默认后 100ns)
 # @requires: schrodinger, plip, conda, conda:md
-# @usage: LAST_NS=100 JOBS=8 run_plip.sh <md-dir>...
+# @usage: LAST_NS=100 JOBS=8 [PEPTIDE_MODE=1 LIGAND_ASL=...] run_plip.sh <md-dir>...
 # run_plip.sh — 对已完成的 MD 目录跑 PLIP 肽–受体相互作用分析(默认后 100ns)
 # ---------------------------------------------------------------------------
 # 从实战沉淀:AutoMD 建模的修饰肽是单个 UNK 残基,PLIP 的 --peptides 肽模式
@@ -13,10 +13,18 @@
 #   - 默认只分析轨迹最后 LAST_NS ns(全帧太贵/也没必要)。
 # 详见 README「PLIP 相互作用分析」与 plip_interaction_analysis.py 顶部说明。
 #
+# 但这只是 UNK 体系的配方。肽若是**正常氨基酸残基**(ACE/NME 封端、独立或空白链),
+# 配体模式识别不到,要反过来走 PLIP 肽模式:PEPTIDE_MODE=1 + 用 LIGAND_ASL 指明
+# 哪些原子是肽(重贴链仍必要,空白链会被链检测忽略)。见踩坑记录 8、9。
+#
 # 用法:
 #   ./run_plip.sh MD_DIR [MD_DIR ...]
 #   LAST_NS=100 JOBS=8 ./run_plip.sh dir1 dir2      # 覆盖默认参数
 #   CHAIN_A=B CHAIN_B=A KEEP_ASL='protein or res.ptype UNK' ./run_plip.sh dir
+#   # 正常残基肽(受体在链 A):
+#   LIG='not chain.name A and not water and not ions' \
+#   PEPTIDE_MODE=1 LIGAND_ASL="$LIG" KEEP_ASL="chain.name A or ($LIG)" \
+#   LIGAND_CHAIN=B CHAIN_A=B CHAIN_B=A ./run_plip.sh dir
 # ---------------------------------------------------------------------------
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +38,10 @@ PLIP_PY="${PLIP_PY:-$HERE/plip_interaction_analysis.py}"
 LAST_NS="${LAST_NS:-100}"                         # 只分析最后 N ns(0=全轨迹)
 JOBS="${JOBS:-8}"                                 # 逐帧 PLIP 并行 worker 数
 KEEP_ASL="${KEEP_ASL:-protein or res.ptype UNK}"  # 导出帧保留:受体+UNK 肽
-LIGAND_CHAIN="${LIGAND_CHAIN:-B}"                 # 把 UNK 肽重贴到这条链
+LIGAND_CHAIN="${LIGAND_CHAIN:-B}"                 # 把肽重贴到这条链
+LIGAND_ASL="${LIGAND_ASL:-res.ptype UNK}"         # 哪些原子算「肽/配体」(重贴链用)
+# 肽=单个 UNK 残基时用配体模式(PEPTIDE_MODE=0);肽是正常残基链时用 PLIP 肽模式(=1)
+PEPTIDE_MODE="${PEPTIDE_MODE:-0}"
 CHAIN_A="${CHAIN_A:-B}"                           # group A = 肽(配体侧)
 CHAIN_B="${CHAIN_B:-A}"                           # group B = 受体
 OUT_NAME="${OUT_NAME:-plip_last100ns}"            # 输出子目录名
@@ -50,12 +61,15 @@ run_one() {
     local out="$dir/$OUT_NAME"
     echo "==================== $(date '+%F %T') PLIP START $name ===================="
     rm -rf "$out"
+    local pep_flag=(--no-plip-peptides)
+    [ "$PEPTIDE_MODE" = "1" ] && pep_flag=()
     python3 "$PLIP_PY" \
         --trajectory-type schrodinger \
         --cms "$cms" --trj-dir "$trj" \
         --schrodinger-keep-asl "$KEEP_ASL" \
-        --ligand-chain "$LIGAND_CHAIN" --chain-a "$CHAIN_A" --chain-b "$CHAIN_B" \
-        --no-plip-peptides --last-ns "$LAST_NS" \
+        --ligand-chain "$LIGAND_CHAIN" --ligand-relabel-asl "$LIGAND_ASL" \
+        --chain-a "$CHAIN_A" --chain-b "$CHAIN_B" \
+        "${pep_flag[@]}" --last-ns "$LAST_NS" \
         --jobs "$JOBS" --plip-maxthreads 1 \
         --threshold "$THRESHOLD" \
         --output-dir "$out"
