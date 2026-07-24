@@ -17,7 +17,7 @@ test_install_creates_symlinks() {
     mkdir -p "$HOME/.claude/skills"
     "$REPO/install.sh" >/dev/null 2>&1
     assert_ok test -L "$HOME/.claude/skills/md-pipeline"
-    assert_eq "$(readlink -f "$HOME/.claude/skills/md-pipeline")" "$REPO/md-pipeline"
+    assert_eq "$(readlink -f "$HOME/.claude/skills/md-pipeline")" "$REPO/skills/science/md-pipeline"
 }
 
 test_install_is_idempotent() {
