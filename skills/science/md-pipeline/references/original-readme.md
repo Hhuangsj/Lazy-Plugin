@@ -144,6 +144,12 @@ RecB_PEPX-P8_Ac-_R_Xaa-Xaa.mae
 
 # 换参数(环境变量覆盖)
 LIGAND_ASL='res.ptype UNK' FRAMES='1:2001:20' ./run_analysis.sh /path/to/XXX-md
+
+# 分析已有 AutoTRJ Align 轨迹；报告写入 analysis_align/
+TRAJECTORY_SOURCE=align ./run_analysis.sh /path/to/XXX-md
+# 多个 Align 产物时显式指定
+ALIGN_CMS=/path/to/XXX-md/PL_Analysis_ALIGN-out.cms \
+TRAJECTORY_SOURCE=align ./run_analysis.sh /path/to/XXX-md
 ```
 
 产出(在各 MD 目录内):
@@ -162,9 +168,15 @@ LIGAND_ASL='res.ptype UNK' FRAMES='1:2001:20' ./run_analysis.sh /path/to/XXX-md
 # 逐帧算相互作用类型 + 残基对占据率,输出到各目录的 plip_last100ns/
 ./run_plip.sh /path/to/XXX-md /path/to/YYY-md
 LAST_NS=100 JOBS=8 ./run_plip.sh /path/to/XXX-md      # 覆盖:窗口/并行数
+# 对已有 Align 轨迹分析，默认输出到 plip_last100ns_align/
+TRAJECTORY_SOURCE=align LAST_NS=100 JOBS=8 ./run_plip.sh /path/to/XXX-md
 ```
 产出 `plip_last100ns/`:`interaction_type_summary.csv`(各类型占据率)、
 `residue_pair_occupancy*.csv` 与 `plot_*` 图(含 `plot_residue_pair_occupancy_B_vs_A.png`)。
+
+`TRAJECTORY_SOURCE=align` 要求 CMS 和轨迹目录成对存在：
+`*_ALIGN-out.cms` 与 `*_ALIGN_trj`。Align 模式会根据 Align CMS 重新生成 event-analysis
+EAF，不复用 raw 轨迹的 EAF；这是因为 CLEAN/ALIGN 可能改变拓扑中的原子集合。
 
 ### 4. 薛定谔 MMGBSA 结合自由能(默认后 100ns 每 20 帧)
 
