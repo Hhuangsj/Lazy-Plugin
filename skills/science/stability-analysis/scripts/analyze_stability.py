@@ -1,3 +1,8 @@
+# @name: analyze_stability
+# @description: Compare user-provided table rows against an optional reference and summarize stability
+# @requires: python3
+# @usage: analyze_stability.py --input <table.csv|table.xlsx> --output-csv <out.csv> --summary <summary.md>
+
 """Table loading and analysis helpers for user-provided stability tables."""
 
 import argparse
