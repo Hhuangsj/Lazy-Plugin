@@ -200,13 +200,16 @@ def write_candidate_csv(
     id_column: str,
     stability_columns: list[str],
     position_columns: list[str],
+    activity_column: str | None = None,
 ) -> None:
     """Write selected candidate fields, retaining raw source strings and row order."""
     if not output.parent.exists():
         raise ValueError(f"Output directory does not exist: {output.parent}")
 
     output_columns = [id_column]
-    for column in [*stability_columns, *position_columns]:
+    for column in [*stability_columns, activity_column, *position_columns]:
+        if column is None:
+            continue
         if column not in output_columns:
             output_columns.append(column)
 
@@ -348,6 +351,18 @@ def _same_path(first: Path, second: Path) -> bool:
     return first.resolve() == second.resolve()
 
 
+def _would_overwrite_input(output: Path, input_path: Path) -> bool:
+    """Detect matching paths and existing hard links before opening any output."""
+    if _same_path(output, input_path):
+        return True
+    if output.exists() and input_path.exists():
+        try:
+            return output.samefile(input_path)
+        except OSError:
+            return False
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run stability analysis only for explicitly supplied input and output paths."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -375,7 +390,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("at least one --stability-column is required")
     if _same_path(args.output_csv, args.summary):
         parser.error("--output-csv and --summary must be different paths")
-    if any(_same_path(args.output_csv, path) or _same_path(args.summary, path) for path in args.input):
+    if any(
+        _would_overwrite_input(output, input_path)
+        for output in (args.output_csv, args.summary)
+        for input_path in args.input
+    ):
         parser.error("output paths must not overwrite an input table")
 
     headers, rows = merge_tables(args.input)
@@ -424,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
         id_column,
         stability_columns,
         position_columns,
+        activity_column,
     )
     _write_summary(
         args.summary,

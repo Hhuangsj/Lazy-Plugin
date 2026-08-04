@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -195,6 +196,32 @@ class CandidateOutputTests(unittest.TestCase):
         self.assertEqual("<0.10", written[1][1])
         self.assertEqual("", written[1][2])
 
+    def test_candidate_csv_includes_requested_raw_activity_after_stability_columns(self):
+        rows = [
+            {
+                "Customer ID": "REF-001",
+                "SIF": "<0.10",
+                "EC50": "<0.00381;0.008669",
+                "AA0": "W",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "candidates.csv"
+            write_candidate_csv(
+                rows,
+                output,
+                "Customer ID",
+                ["SIF"],
+                ["AA0"],
+                activity_column="EC50",
+            )
+            with output.open(newline="", encoding="utf-8") as handle:
+                written = list(csv.reader(handle))
+
+        self.assertEqual(["Customer ID", "SIF", "EC50", "AA0"], written[0])
+        self.assertEqual("<0.00381;0.008669", written[1][2])
+
 
 class CliTests(unittest.TestCase):
     def _write_input(self, directory: str) -> Path:
@@ -235,7 +262,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(0, result)
         self.assertEqual(
-            ["Customer ID", "SIF", "SGF", "AA0", "1", "Sequence_Decomposition/AA1"],
+            ["Customer ID", "SIF", "SGF", "EC50", "AA0", "1", "Sequence_Decomposition/AA1"],
             written[0],
         )
         self.assertEqual(
@@ -243,6 +270,7 @@ class CliTests(unittest.TestCase):
             [row[0] for row in written[1:]],
         )
         self.assertEqual("<0.10", written[1][1])
+        self.assertEqual("4", written[1][3])
         self.assertIn("Per-group counts", summary_text)
         self.assertIn("A: 3", summary_text)
         self.assertIn("B: 1", summary_text)
@@ -280,6 +308,34 @@ class CliTests(unittest.TestCase):
                 ])
             with self.assertRaisesRegex(ValueError, "Missing column"):
                 main([*base, "--activity-column", "Missing", "--activity-direction", "lower"])
+
+    def test_cli_rejects_hard_linked_candidate_or_summary_output(self):
+        for output_option in ("--output-csv", "--summary"):
+            with self.subTest(output_option=output_option), tempfile.TemporaryDirectory() as temp_dir:
+                input_path = self._write_input(temp_dir)
+                original = input_path.read_text(encoding="utf-8")
+                linked_output = Path(temp_dir) / f"{output_option[2:]}.csv"
+                os.link(input_path, linked_output)
+                candidate_output = (
+                    linked_output
+                    if output_option == "--output-csv"
+                    else Path(temp_dir) / "candidates.csv"
+                )
+                summary_output = (
+                    linked_output
+                    if output_option == "--summary"
+                    else Path(temp_dir) / "summary.md"
+                )
+
+                with self.assertRaises(SystemExit):
+                    main([
+                        "--input", str(input_path),
+                        "--output-csv", str(candidate_output),
+                        "--summary", str(summary_output),
+                        "--stability-column", "SIF",
+                    ])
+
+                self.assertEqual(original, input_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
