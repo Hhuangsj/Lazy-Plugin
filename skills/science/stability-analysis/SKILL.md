@@ -16,13 +16,15 @@ Follow this order before running the analysis:
 3. Accept an optional grouping column or scope, such as `Project` or `Pipeline`. If none is provided, analyze the full input table.
 4. Require an activity column, an activity direction (`lower` or `higher`), and an optional threshold before filtering. If the threshold is omitted, report an overview without filtering rather than inventing a cutoff.
 5. Ask the user for stability columns when they cannot be identified from the request or the input headers.
-6. Run `scripts/analyze_stability.py` with explicit arguments, then report the output CSV path and summary path.
+6. Ask for, or confirm with the user, the CSV output path and summary output path before invocation. Do not silently choose or overwrite user-selected output locations.
+7. Run `scripts/analyze_stability.py` with explicit arguments, then report the confirmed output CSV path and summary path.
 
 Do not assume that a particular activity name, reference format, grouping field, or stability-column naming convention is universal. Preserve the user's column names exactly when passing them to the script.
+When tables from multiple source files are merged, retain source-file provenance for every row in the analysis outputs and preserve raw input values in exported rows. Write only new analysis outputs; never modify, rewrite, or overwrite the input tables.
 
 ## Invocation
 
-Run the script from the repository root (or use the skill's repository root as the working directory). Include only arguments supported by the available inputs and the user's confirmed choices. For example, using current AssayView-style columns:
+Run the script from the repository root (or use the skill's repository root as the working directory). Include only arguments supported by the available inputs and the user's confirmed choices. Before invocation, ask for or confirm both output paths; the example below uses paths that must be confirmed by the user. For example, using current AssayView-style columns:
 
 ```bash
 python3 scripts/analyze_stability.py \
