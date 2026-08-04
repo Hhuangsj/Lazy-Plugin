@@ -95,8 +95,15 @@ def find_reference(
     for row in rows:
         for column in id_columns:
             value = row.get(column, "")
-            tokens = [token.strip() for token in value.replace(";", ",").split(",")]
-            if value == identifier or identifier in tokens:
+            normalized_column = "".join(column.lower().split())
+            is_alias_column = "alias" in normalized_column
+            matches_identifier = value == identifier
+            if not matches_identifier and is_alias_column:
+                alias_tokens = [
+                    token.strip() for token in value.replace(";", ",").split(",")
+                ]
+                matches_identifier = identifier in alias_tokens
+            if matches_identifier:
                 matches.append(row)
                 break
 
