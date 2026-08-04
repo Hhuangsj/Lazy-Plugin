@@ -95,8 +95,7 @@ def find_reference(
     for row in rows:
         for column in id_columns:
             value = row.get(column, "")
-            normalized_column = "".join(column.lower().split())
-            is_alias_column = "alias" in normalized_column
+            is_alias_column = column.strip().casefold() == "alias"
             matches_identifier = value == identifier
             if not matches_identifier and is_alias_column:
                 alias_tokens = [

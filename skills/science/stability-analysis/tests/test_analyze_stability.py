@@ -81,11 +81,16 @@ class FieldResolutionTests(unittest.TestCase):
             "SAMPLE-002", find_reference(rows, "backup", ["Customer ID", "Alias"])["Customer ID"]
         )
 
-    def test_find_reference_does_not_tokenize_non_alias_identifier_columns(self):
-        rows = [{"CompoundID": "CMP-001, legacy", "Alias": "reference"}]
+    def test_find_reference_does_not_tokenize_non_alias_id_columns(self):
+        rows = [{"NonAliasID": "CMP-001, legacy", "Alias": "reference"}]
 
         with self.assertRaisesRegex(ValueError, "not found"):
-            find_reference(rows, "legacy", ["CompoundID", "Alias"])
+            find_reference(rows, "legacy", ["NonAliasID", "Alias"])
+
+    def test_find_reference_tokenizes_alias_column(self):
+        rows = [{"Alias": "CMP-001, legacy"}]
+
+        self.assertEqual(rows[0], find_reference(rows, "legacy", ["Alias"]))
 
     def test_find_reference_rejects_ambiguous_match(self):
         rows = [
