@@ -206,13 +206,19 @@ def write_candidate_csv(
     stability_columns: list[str],
     position_columns: list[str],
     activity_column: str | None = None,
+    provenance_column: str | None = None,
 ) -> None:
     """Write selected candidate fields, retaining raw source strings and row order."""
     if not output.parent.exists():
         raise ValueError(f"Output directory does not exist: {output.parent}")
 
     output_columns = [id_column]
-    for column in [*stability_columns, activity_column, *position_columns]:
+    for column in [
+        *stability_columns,
+        activity_column,
+        provenance_column,
+        *position_columns,
+    ]:
         if column is None:
             continue
         if column not in output_columns:
@@ -226,10 +232,13 @@ def write_candidate_csv(
 
 
 def _sort_by_activity(
-    rows: list[dict[str, str]], column: str | None, direction: str | None
+    rows: list[dict[str, str]],
+    column: str | None,
+    direction: str | None,
+    threshold: float | None,
 ) -> list[dict[str, str]]:
-    """Sort parseable activity values deterministically, keeping missing values last."""
-    if column is None or direction is None:
+    """Sort activity-qualified rows deterministically, keeping missing values last."""
+    if column is None or direction is None or threshold is None:
         return list(rows)
 
     decorated = list(enumerate(rows))
@@ -391,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
         args.activity_column is None or args.activity_direction is None
     ):
         parser.error("--activity-threshold requires --activity-column and --activity-direction")
+    if "__source_file" in [*args.stability_column, *args.position_column]:
+        parser.error("__source_file is reserved for source provenance")
     if not args.stability_column:
         parser.error("at least one --stability-column is required")
     if _same_path(args.output_csv, args.summary):
@@ -416,8 +427,11 @@ def main(argv: list[str] | None = None) -> int:
     reference = None
     if args.reference is not None:
         reference_columns = [id_column]
-        if "Alias" in headers and "Alias" not in reference_columns:
-            reference_columns.append("Alias")
+        reference_columns.extend(
+            header
+            for header in headers
+            if header.strip().casefold() == "alias" and header not in reference_columns
+        )
         reference = find_reference(rows, args.reference, reference_columns)
 
     scope_rows = filter_by_scope(rows, group_by, args.group_value)
@@ -439,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         [row for row in activity_rows if row is not reference],
         activity_column,
         args.activity_direction,
+        args.activity_threshold,
     )
     if reference is not None:
         candidate_rows.insert(0, reference)
@@ -449,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         stability_columns,
         position_columns,
         activity_column,
+        "__source_file" if "__source_file" in headers else None,
     )
     _write_summary(
         args.summary,

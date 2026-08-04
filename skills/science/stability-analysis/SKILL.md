@@ -27,7 +27,7 @@ When tables from multiple source files are merged, retain source-file provenance
 Run the script from the repository root (or use the skill's repository root as the working directory). Include only arguments supported by the available inputs and the user's confirmed choices. Before invocation, ask for or confirm both output paths; the example below uses paths that must be confirmed by the user. For example, using current AssayView-style columns:
 
 ```bash
-python3 scripts/analyze_stability.py \
+python3 skills/science/stability-analysis/scripts/analyze_stability.py \
   --input AssayView.csv \
   --output-csv stability_candidates.csv \
   --summary stability_summary.md \

@@ -262,7 +262,10 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(0, result)
         self.assertEqual(
-            ["Customer ID", "SIF", "SGF", "EC50", "AA0", "1", "Sequence_Decomposition/AA1"],
+            [
+                "Customer ID", "SIF", "SGF", "EC50", "__source_file",
+                "AA0", "1", "Sequence_Decomposition/AA1",
+            ],
             written[0],
         )
         self.assertEqual(
@@ -275,6 +278,108 @@ class CliTests(unittest.TestCase):
         self.assertIn("A: 3", summary_text)
         self.assertIn("B: 1", summary_text)
         self.assertIn("reference_raw_value: <0.10", summary_text)
+
+    def test_cli_matches_reference_tokens_from_normalized_alias_headers(self):
+        for alias_header in (" alias ", "ALIAS"):
+            with self.subTest(alias_header=alias_header), tempfile.TemporaryDirectory() as temp_dir:
+                input_path = Path(temp_dir) / "input.csv"
+                input_path.write_text(
+                    f"Customer ID,{alias_header},SIF\n"
+                    "REF-001,reference; control,<0.10\n"
+                    "CAND-001,backup,2.5\n",
+                    encoding="utf-8",
+                )
+                output = Path(temp_dir) / "candidates.csv"
+                summary = Path(temp_dir) / "summary.md"
+
+                result = main([
+                    "--input", str(input_path),
+                    "--output-csv", str(output),
+                    "--summary", str(summary),
+                    "--reference", "control",
+                    "--stability-column", "SIF",
+                ])
+                with output.open(newline="", encoding="utf-8") as handle:
+                    written = list(csv.reader(handle))
+
+                self.assertEqual(0, result)
+                self.assertEqual("REF-001", written[1][0])
+
+    def test_cli_preserves_provenance_in_multi_source_candidate_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = Path(temp_dir) / "first.csv"
+            second = Path(temp_dir) / "second.csv"
+            first.write_text(
+                "Customer ID,EC50,SIF,AA0\nCAND-001,1,<0.10,W\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "Customer ID,EC50,SIF,AA0\nCAND-002,2,2.5,F\n",
+                encoding="utf-8",
+            )
+            output = Path(temp_dir) / "candidates.csv"
+            summary = Path(temp_dir) / "summary.md"
+
+            result = main([
+                "--input", str(first), str(second),
+                "--output-csv", str(output),
+                "--summary", str(summary),
+                "--activity-column", "EC50",
+                "--activity-direction", "lower",
+                "--activity-threshold", "3",
+                "--stability-column", "SIF",
+            ])
+            with output.open(newline="", encoding="utf-8") as handle:
+                written = list(csv.reader(handle))
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ["Customer ID", "SIF", "EC50", "__source_file", "AA0"],
+            written[0],
+        )
+        self.assertEqual(
+            [["CAND-001", str(first)], ["CAND-002", str(second)]],
+            [[row[0], row[3]] for row in written[1:]],
+        )
+
+    def test_cli_overview_keeps_input_order_when_activity_has_no_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = self._write_input(temp_dir)
+            output = Path(temp_dir) / "candidates.csv"
+            summary = Path(temp_dir) / "summary.md"
+
+            result = main([
+                "--input", str(input_path),
+                "--output-csv", str(output),
+                "--summary", str(summary),
+                "--activity-column", "EC50",
+                "--activity-direction", "lower",
+                "--stability-column", "SIF",
+            ])
+            with output.open(newline="", encoding="utf-8") as handle:
+                written = list(csv.reader(handle))
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ["REF-001", "CAND-002", "CAND-001", "OFF-SCOPE"],
+            [row[0] for row in written[1:]],
+        )
+        self.assertEqual(["4", "1.2", "0.5", "0.1"], [row[2] for row in written[1:]])
+
+    def test_cli_rejects_source_file_as_a_user_selected_output_column(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = self._write_input(temp_dir)
+            output = Path(temp_dir) / "candidates.csv"
+            summary = Path(temp_dir) / "summary.md"
+            base = [
+                "--input", str(input_path),
+                "--output-csv", str(output),
+                "--summary", str(summary),
+            ]
+
+            for option in ("--stability-column", "--position-column"):
+                with self.subTest(option=option), self.assertRaises(SystemExit):
+                    main([*base, "--stability-column", "SIF", option, "__source_file"])
 
     def test_cli_rejects_invalid_scope_and_empty_or_out_of_scope_reference_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
