@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import csv
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,11 +10,17 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from analyze_stability import (
+    filter_by_activity,
+    filter_by_scope,
     find_reference,
+    main,
     merge_tables,
+    parse_first_number,
     read_table,
     resolve_column,
     resolve_id_column,
+    summarize_column,
+    write_candidate_csv,
 )
 
 
@@ -100,6 +107,179 @@ class FieldResolutionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             find_reference(rows, "control", ["Customer ID", "Alias"])
+
+
+class ActivityAndSummaryTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = [
+            {"Project": "A", "EC50": "<0.00381;0.008669", "SIF": "<0.10"},
+            {"Project": "A", "EC50": "2", "SIF": ""},
+            {"Project": "B", "EC50": "3.1", "SIF": "-"},
+            {"Project": "B", "EC50": "not tested", "SIF": "4.5"},
+        ]
+
+    def test_parse_first_number_uses_the_first_numeric_token(self):
+        self.assertEqual(0.00381, parse_first_number("<0.00381;0.008669"))
+        self.assertIsNone(parse_first_number("-"))
+
+    def test_activity_filter_supports_lower_and_higher_thresholds(self):
+        lower = filter_by_activity(self.rows, "EC50", "lower", 2)
+        higher = filter_by_activity(self.rows, "EC50", "higher", 2)
+
+        self.assertEqual(["<0.00381;0.008669", "2"], [row["EC50"] for row in lower])
+        self.assertEqual(["2", "3.1"], [row["EC50"] for row in higher])
+
+    def test_activity_filter_keeps_all_rows_when_not_configured(self):
+        self.assertEqual(self.rows, filter_by_activity(self.rows, None, None, None))
+
+    def test_scope_keeps_all_rows_or_filters_by_exact_group_value(self):
+        self.assertEqual(self.rows, filter_by_scope(self.rows, "Project", None))
+        self.assertEqual(
+            [self.rows[0], self.rows[1]],
+            filter_by_scope(self.rows, "Project", "A"),
+        )
+        with self.assertRaisesRegex(ValueError, "group-by"):
+            filter_by_scope(self.rows, None, "A")
+
+    def test_stability_summary_counts_raw_values_without_rewriting_them(self):
+        summary = summarize_column(self.rows, "SIF")
+
+        self.assertEqual(4, summary["total"])
+        self.assertEqual(3, summary["nonempty"])
+        self.assertEqual(1, summary["missing"])
+        self.assertEqual(2, summary["parseable"])
+        self.assertEqual(2.3, summary["median"])
+        self.assertEqual(0.1, summary["min"])
+        self.assertEqual(4.5, summary["max"])
+        self.assertIsNone(summary["reference_raw_value"])
+
+
+class CandidateOutputTests(unittest.TestCase):
+    def test_candidate_csv_writes_reference_first_and_preserves_position_order(self):
+        rows = [
+            {
+                "Customer ID": "REF-001",
+                "SIF": "<0.10",
+                "SGF": "",
+                "AA0": "W",
+                "1": "A",
+                "Sequence_Decomposition/AA1": "G",
+            },
+            {
+                "Customer ID": "CAND-001",
+                "SIF": "2.5",
+                "SGF": "-",
+                "AA0": "F",
+                "1": "L",
+                "Sequence_Decomposition/AA1": "P",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "candidates.csv"
+            write_candidate_csv(
+                rows,
+                output,
+                "Customer ID",
+                ["SIF", "SGF"],
+                ["AA0", "1", "Sequence_Decomposition/AA1"],
+            )
+            with output.open(newline="", encoding="utf-8") as handle:
+                written = list(csv.reader(handle))
+
+        self.assertEqual(
+            ["Customer ID", "SIF", "SGF", "AA0", "1", "Sequence_Decomposition/AA1"],
+            written[0],
+        )
+        self.assertEqual("REF-001", written[1][0])
+        self.assertEqual("<0.10", written[1][1])
+        self.assertEqual("", written[1][2])
+
+
+class CliTests(unittest.TestCase):
+    def _write_input(self, directory: str) -> Path:
+        input_path = Path(directory) / "input.csv"
+        input_path.write_text(
+            "Customer ID,Project,EC50,SIF,SGF,AA0,1,Sequence_Decomposition/AA1\n"
+            "REF-001,A,4,<0.10,0.25,W,A,G\n"
+            "CAND-002,A,1.2,2.5,,F,L,P\n"
+            "CAND-001,A,0.5,-,5,Y,V,Q\n"
+            "OFF-SCOPE,B,0.1,9,7,C,D,E\n",
+            encoding="utf-8",
+        )
+        return input_path
+
+    def test_cli_writes_scope_summary_and_reference_first_sorted_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = self._write_input(temp_dir)
+            output = Path(temp_dir) / "candidates.csv"
+            summary = Path(temp_dir) / "summary.md"
+
+            result = main(
+                [
+                    "--input", str(input_path),
+                    "--output-csv", str(output),
+                    "--summary", str(summary),
+                    "--reference", "REF-001",
+                    "--group-by", "Project",
+                    "--activity-column", "EC50",
+                    "--activity-direction", "lower",
+                    "--activity-threshold", "2",
+                    "--stability-column", "SIF",
+                    "--stability-column", "SGF",
+                ]
+            )
+            with output.open(newline="", encoding="utf-8") as handle:
+                written = list(csv.reader(handle))
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            ["Customer ID", "SIF", "SGF", "AA0", "1", "Sequence_Decomposition/AA1"],
+            written[0],
+        )
+        self.assertEqual(
+            ["REF-001", "OFF-SCOPE", "CAND-001", "CAND-002"],
+            [row[0] for row in written[1:]],
+        )
+        self.assertEqual("<0.10", written[1][1])
+        self.assertIn("Per-group counts", summary_text)
+        self.assertIn("A: 3", summary_text)
+        self.assertIn("B: 1", summary_text)
+        self.assertIn("reference_raw_value: <0.10", summary_text)
+
+    def test_cli_rejects_invalid_scope_and_empty_or_out_of_scope_reference_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = self._write_input(temp_dir)
+            output = Path(temp_dir) / "candidates.csv"
+            summary = Path(temp_dir) / "summary.md"
+            base = [
+                "--input", str(input_path),
+                "--output-csv", str(output),
+                "--summary", str(summary),
+                "--stability-column", "SIF",
+            ]
+
+            with self.assertRaises(SystemExit):
+                main([*base, "--group-value", "A"])
+            with self.assertRaises(SystemExit):
+                main([*base, "--activity-threshold", "2"])
+            with self.assertRaisesRegex(ValueError, "No rows remain"):
+                main([
+                    *base,
+                    "--activity-column", "EC50",
+                    "--activity-direction", "lower",
+                    "--activity-threshold", "0.01",
+                ])
+            with self.assertRaisesRegex(ValueError, "not in the selected scope"):
+                main([
+                    *base,
+                    "--reference", "REF-001",
+                    "--group-by", "Project",
+                    "--group-value", "B",
+                ])
+            with self.assertRaisesRegex(ValueError, "Missing column"):
+                main([*base, "--activity-column", "Missing", "--activity-direction", "lower"])
 
 
 if __name__ == "__main__":

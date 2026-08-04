@@ -1,10 +1,17 @@
-"""Table loading and field resolution helpers for stability analysis."""
+"""Table loading and analysis helpers for user-provided stability tables."""
 
+import argparse
 import csv
+import re
+import statistics
 from pathlib import Path
 
 
 SUPPORTED_EXTENSIONS = ".csv, .xlsx"
+FIRST_NUMBER_PATTERN = re.compile(
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
+POSITION_COLUMN_PATTERN = re.compile(r"(?:^|/)AA\d+$")
 
 
 def read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -111,3 +118,331 @@ def find_reference(
     if len(matches) > 1:
         raise ValueError(f"ambiguous reference identifier: {identifier}")
     return matches[0]
+
+
+def parse_first_number(raw: str) -> float | None:
+    """Return the first numeric token in a displayed table cell."""
+    match = FIRST_NUMBER_PATTERN.search(raw)
+    return float(match.group()) if match else None
+
+
+def filter_by_scope(
+    rows: list[dict[str, str]], group_by: str | None, group_value: str | None
+) -> list[dict[str, str]]:
+    """Return rows in the exact requested group, or all rows when unscoped."""
+    if group_value is not None and group_by is None:
+        raise ValueError("--group-value requires --group-by")
+    if group_by is None or group_value is None:
+        return list(rows)
+    return [row for row in rows if row.get(group_by, "") == group_value]
+
+
+def filter_by_activity(
+    rows: list[dict[str, str]],
+    column: str | None,
+    direction: str | None,
+    threshold: float | None,
+) -> list[dict[str, str]]:
+    """Apply a numeric activity threshold without changing displayed cell values."""
+    if column is None or direction is None or threshold is None:
+        return list(rows)
+    if direction not in {"lower", "higher"}:
+        raise ValueError(f"Unsupported activity direction: {direction}")
+
+    selected: list[dict[str, str]] = []
+    for row in rows:
+        value = parse_first_number(row.get(column, ""))
+        if value is None:
+            continue
+        if direction == "lower" and value <= threshold:
+            selected.append(row)
+        if direction == "higher" and value >= threshold:
+            selected.append(row)
+    return selected
+
+
+def summarize_column(rows: list[dict[str, str]], column: str) -> dict[str, object]:
+    """Summarize raw stability cells using only their first numeric token."""
+    raw_values = [row.get(column, "") for row in rows]
+    nonempty_values = [value for value in raw_values if value.strip()]
+    numeric_values = [
+        number
+        for value in nonempty_values
+        if (number := parse_first_number(value)) is not None
+    ]
+    return {
+        "total": len(raw_values),
+        "nonempty": len(nonempty_values),
+        "missing": len(raw_values) - len(nonempty_values),
+        "parseable": len(numeric_values),
+        "median": statistics.median(numeric_values) if numeric_values else None,
+        "min": min(numeric_values) if numeric_values else None,
+        "max": max(numeric_values) if numeric_values else None,
+        "reference_raw_value": None,
+    }
+
+
+def _position_columns(headers: list[str], requested: list[str]) -> list[str]:
+    """Resolve an explicit position override or detect conventional position columns."""
+    if requested:
+        resolved = {resolve_column(headers, column) for column in requested}
+        return [header for header in headers if header in resolved]
+    return [
+        header
+        for header in headers
+        if header.isdecimal() or POSITION_COLUMN_PATTERN.search(header)
+    ]
+
+
+def write_candidate_csv(
+    rows: list[dict[str, str]],
+    output: Path,
+    id_column: str,
+    stability_columns: list[str],
+    position_columns: list[str],
+) -> None:
+    """Write selected candidate fields, retaining raw source strings and row order."""
+    if not output.parent.exists():
+        raise ValueError(f"Output directory does not exist: {output.parent}")
+
+    output_columns = [id_column]
+    for column in [*stability_columns, *position_columns]:
+        if column not in output_columns:
+            output_columns.append(column)
+
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Customer ID", *output_columns[1:]])
+        for row in rows:
+            writer.writerow([row.get(column, "") for column in output_columns])
+
+
+def _sort_by_activity(
+    rows: list[dict[str, str]], column: str | None, direction: str | None
+) -> list[dict[str, str]]:
+    """Sort parseable activity values deterministically, keeping missing values last."""
+    if column is None or direction is None:
+        return list(rows)
+
+    decorated = list(enumerate(rows))
+
+    def sort_key(item: tuple[int, dict[str, str]]) -> tuple[bool, float, int]:
+        index, row = item
+        value = parse_first_number(row.get(column, ""))
+        if value is None:
+            return True, 0.0, index
+        return False, value if direction == "lower" else -value, index
+
+    return [
+        row
+        for _, row in sorted(decorated, key=sort_key)
+    ]
+
+
+def _group_counts(rows: list[dict[str, str]], group_by: str) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(group_by, "")
+        counts[value] = counts.get(value, 0) + 1
+    return list(counts.items())
+
+
+def _write_summary(
+    output: Path,
+    input_paths: list[Path],
+    total_rows: int,
+    scope_rows: list[dict[str, str]],
+    activity_rows: list[dict[str, str]],
+    reference: dict[str, str] | None,
+    id_column: str,
+    group_by: str | None,
+    group_value: str | None,
+    activity_column: str | None,
+    activity_direction: str | None,
+    activity_threshold: float | None,
+    stability_columns: list[str],
+    candidate_output: Path,
+) -> None:
+    """Write a human-readable, raw-value-preserving analysis summary."""
+    if not output.parent.exists():
+        raise ValueError(f"Output directory does not exist: {output.parent}")
+
+    filter_active = (
+        activity_column is not None
+        and activity_direction is not None
+        and activity_threshold is not None
+    )
+    lines = ["# Stability analysis", "", "## Inputs", ""]
+    lines.extend(f"- {path}" for path in input_paths)
+    lines.extend(
+        [
+            "",
+            "## Rows",
+            "",
+            f"- Input rows: {total_rows}",
+            f"- Rows in scope: {len(scope_rows)}",
+            f"- Activity-qualified rows: {len(activity_rows)}",
+            "",
+            "## Reference",
+            "",
+            (
+                f"- Matched {id_column}: {reference.get(id_column, '')}"
+                if reference is not None
+                else "- No reference requested"
+            ),
+            "",
+            "## Scope",
+            "",
+        ]
+    )
+    if group_by is None:
+        lines.append("- Full input table")
+    elif group_value is None:
+        lines.append(f"- Group column: {group_by} (full table)")
+        lines.append("- Per-group counts:")
+        lines.extend(f"  - {value}: {count}" for value, count in _group_counts(scope_rows, group_by))
+    else:
+        lines.append(f"- {group_by} exactly equals: {group_value}")
+
+    lines.extend(["", "## Activity", ""])
+    if filter_active:
+        lines.append(
+            f"- Filtered: {activity_column} {activity_direction} {activity_threshold}"
+        )
+    else:
+        lines.append("- Unfiltered")
+    if activity_column is not None:
+        activity_raw_values = [row.get(activity_column, "") for row in scope_rows]
+        missing_activity = sum(
+            parse_first_number(value) is None for value in activity_raw_values
+        )
+        censored_activity = sum(value.lstrip().startswith(("<", ">")) for value in activity_raw_values)
+        lines.append(f"- Missing or unparseable activity values: {missing_activity}")
+        lines.append(f"- Censored activity values: {censored_activity}")
+
+    lines.extend(["", "## Stability columns", ""])
+    for column in stability_columns:
+        summary = summarize_column(activity_rows, column)
+        if reference is not None:
+            summary["reference_raw_value"] = reference.get(column, "")
+        lines.extend(
+            [
+                f"### {column}",
+                "",
+                f"- total: {summary['total']}",
+                f"- nonempty: {summary['nonempty']}",
+                f"- missing: {summary['missing']}",
+                f"- parseable: {summary['parseable']}",
+                f"- median: {summary['median']}",
+                f"- min: {summary['min']}",
+                f"- max: {summary['max']}",
+                f"- reference_raw_value: {summary['reference_raw_value'] if reference is not None else 'not available'}",
+                "",
+            ]
+        )
+    lines.extend(["## Outputs", "", f"- Candidate CSV: {candidate_output}", ""])
+    output.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    return first.resolve() == second.resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run stability analysis only for explicitly supplied input and output paths."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", nargs="+", required=True, type=Path)
+    parser.add_argument("--output-csv", required=True, type=Path)
+    parser.add_argument("--summary", required=True, type=Path)
+    parser.add_argument("--reference")
+    parser.add_argument("--id-column")
+    parser.add_argument("--group-by")
+    parser.add_argument("--group-value")
+    parser.add_argument("--activity-column")
+    parser.add_argument("--activity-direction", choices=("lower", "higher"))
+    parser.add_argument("--activity-threshold", type=float)
+    parser.add_argument("--stability-column", action="append", default=[])
+    parser.add_argument("--position-column", action="append", default=[])
+    args = parser.parse_args(argv)
+
+    if args.group_value is not None and args.group_by is None:
+        parser.error("--group-value requires --group-by")
+    if args.activity_threshold is not None and (
+        args.activity_column is None or args.activity_direction is None
+    ):
+        parser.error("--activity-threshold requires --activity-column and --activity-direction")
+    if not args.stability_column:
+        parser.error("at least one --stability-column is required")
+    if _same_path(args.output_csv, args.summary):
+        parser.error("--output-csv and --summary must be different paths")
+    if any(_same_path(args.output_csv, path) or _same_path(args.summary, path) for path in args.input):
+        parser.error("output paths must not overwrite an input table")
+
+    headers, rows = merge_tables(args.input)
+    if not rows:
+        raise ValueError("Input tables contain no rows")
+    id_column = resolve_id_column(headers, args.id_column)
+    group_by = resolve_column(headers, args.group_by) if args.group_by else None
+    activity_column = (
+        resolve_column(headers, args.activity_column) if args.activity_column else None
+    )
+    stability_columns = [resolve_column(headers, column) for column in args.stability_column]
+    position_columns = _position_columns(headers, args.position_column)
+
+    reference = None
+    if args.reference is not None:
+        reference_columns = [id_column]
+        if "Alias" in headers and "Alias" not in reference_columns:
+            reference_columns.append("Alias")
+        reference = find_reference(rows, args.reference, reference_columns)
+
+    scope_rows = filter_by_scope(rows, group_by, args.group_value)
+    if reference is not None and not any(row is reference for row in scope_rows):
+        raise ValueError("Reference molecule is not in the selected scope")
+    if not scope_rows:
+        raise ValueError("No rows remain after applying scope")
+
+    activity_rows = filter_by_activity(
+        scope_rows,
+        activity_column,
+        args.activity_direction,
+        args.activity_threshold,
+    )
+    if not activity_rows:
+        raise ValueError("No rows remain after applying activity filter")
+
+    candidate_rows = _sort_by_activity(
+        [row for row in activity_rows if row is not reference],
+        activity_column,
+        args.activity_direction,
+    )
+    if reference is not None:
+        candidate_rows.insert(0, reference)
+    write_candidate_csv(
+        candidate_rows,
+        args.output_csv,
+        id_column,
+        stability_columns,
+        position_columns,
+    )
+    _write_summary(
+        args.summary,
+        args.input,
+        len(rows),
+        scope_rows,
+        activity_rows,
+        reference,
+        id_column,
+        group_by,
+        args.group_value,
+        activity_column,
+        args.activity_direction,
+        args.activity_threshold,
+        stability_columns,
+        args.output_csv,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
