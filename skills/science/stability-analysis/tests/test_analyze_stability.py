@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import csv
+import io
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +53,19 @@ class TableLoadingTests(unittest.TestCase):
         self.assertEqual("beta", rows[1]["Second only"])
         self.assertEqual(str(first), rows[0]["__source_file"])
         self.assertEqual(str(second), rows[1]["__source_file"])
+
+    def test_merge_tables_rejects_reserved_user_headers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for header in ("__source_file", " __SOURCE_FILE "):
+                with self.subTest(header=header):
+                    input_path = Path(temp_dir) / "input.csv"
+                    input_path.write_text(
+                        f"Customer ID,{header}\nREF-001,user-value\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "reserved.*source provenance"):
+                        merge_tables([input_path])
 
     def test_read_xlsx_without_openpyxl_names_required_dependency(self):
         with patch.dict(sys.modules, {"openpyxl": None}):
@@ -366,7 +380,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(["4", "1.2", "0.5", "0.1"], [row[2] for row in written[1:]])
 
-    def test_cli_rejects_source_file_as_a_user_selected_output_column(self):
+    def test_cli_rejects_source_file_as_any_user_selected_column(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = self._write_input(temp_dir)
             output = Path(temp_dir) / "candidates.csv"
@@ -377,9 +391,22 @@ class CliTests(unittest.TestCase):
                 "--summary", str(summary),
             ]
 
-            for option in ("--stability-column", "--position-column"):
-                with self.subTest(option=option), self.assertRaises(SystemExit):
-                    main([*base, "--stability-column", "SIF", option, "__source_file"])
+            for option in (
+                "--id-column",
+                "--group-by",
+                "--activity-column",
+                "--stability-column",
+                "--position-column",
+            ):
+                for value in ("__source_file", " __SOURCE_FILE "):
+                    with self.subTest(option=option, value=value):
+                        stderr = io.StringIO()
+                        with patch("sys.stderr", stderr), self.assertRaises(SystemExit):
+                            main([*base, "--stability-column", "SIF", option, value])
+                        self.assertIn(
+                            "__source_file is reserved for source provenance",
+                            stderr.getvalue(),
+                        )
 
     def test_cli_rejects_invalid_scope_and_empty_or_out_of_scope_reference_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:

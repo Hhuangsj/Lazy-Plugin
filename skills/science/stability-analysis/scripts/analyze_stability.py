@@ -19,6 +19,21 @@ FIRST_NUMBER_PATTERN = re.compile(
 POSITION_COLUMN_PATTERN = re.compile(r"(?:^|/)AA\d+$")
 
 
+def _is_reserved_column_name(column: str) -> bool:
+    """Return whether a user-supplied column name conflicts with provenance."""
+    return column.strip().casefold() == "__source_file"
+
+
+def _reject_reserved_input_headers(headers: list[str], path: Path) -> None:
+    """Reject user headers that would be overwritten by internal provenance."""
+    for header in headers:
+        if _is_reserved_column_name(header):
+            raise ValueError(
+                f"Input table {path} contains reserved column {header!r}; "
+                "__source_file is reserved for source provenance"
+            )
+
+
 def read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Read a CSV or XLSX table while preserving its displayed cell values."""
     suffix = path.suffix.lower()
@@ -26,6 +41,7 @@ def read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         with path.open(newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
             headers = list(reader.fieldnames or [])
+            _reject_reserved_input_headers(headers, path)
             rows = [
                 {header: value if value is not None else "" for header, value in row.items() if header is not None}
                 for row in reader
@@ -51,6 +67,7 @@ def read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:
                 if headers is None:
                     if any(value != "" for value in normalized):
                         headers = normalized
+                        _reject_reserved_input_headers(headers, path)
                     continue
                 rows.append(dict(zip(headers, normalized)))
             return headers or [], rows
@@ -394,14 +411,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--position-column", action="append", default=[])
     args = parser.parse_args(argv)
 
+    user_column_arguments = {
+        "--id-column": [args.id_column],
+        "--group-by": [args.group_by],
+        "--activity-column": [args.activity_column],
+        "--stability-column": args.stability_column,
+        "--position-column": args.position_column,
+    }
+    for option, columns in user_column_arguments.items():
+        if any(
+            column is not None and _is_reserved_column_name(column)
+            for column in columns
+        ):
+            parser.error(
+                f"{option} cannot use __source_file; "
+                "__source_file is reserved for source provenance"
+            )
     if args.group_value is not None and args.group_by is None:
         parser.error("--group-value requires --group-by")
     if args.activity_threshold is not None and (
         args.activity_column is None or args.activity_direction is None
     ):
         parser.error("--activity-threshold requires --activity-column and --activity-direction")
-    if "__source_file" in [*args.stability_column, *args.position_column]:
-        parser.error("__source_file is reserved for source provenance")
     if not args.stability_column:
         parser.error("at least one --stability-column is required")
     if _same_path(args.output_csv, args.summary):
