@@ -1,0 +1,3 @@
+Customer ID,CompoundID,Alias,Assay
+REF-001,CMP-001,"reference, control",1.2
+SAMPLE-002,CMP-002,secondary; backup,2.4
