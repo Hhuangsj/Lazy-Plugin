@@ -147,6 +147,11 @@ def _non_target_metadata_signature(path, target_indices):
 
     _, model = topo.read_cms(str(path))
     target = set(target_indices)
+    component_map = preparation._full_system_component_map(model)
+    component_targets = {
+        component_map[full_system_index]
+        for full_system_index in target
+    }
     full = tuple(
         (atom.index, atom.chain, atom.resnum, atom.inscode, atom.pdbres)
         for atom in model.fsys_ct.atom
@@ -154,7 +159,6 @@ def _non_target_metadata_signature(path, target_indices):
     )
     components = tuple(
         (
-            full_index,
             ct_index,
             component_index,
             component.atom[component_index].chain,
@@ -162,9 +166,9 @@ def _non_target_metadata_signature(path, target_indices):
             component.atom[component_index].inscode,
             component.atom[component_index].pdbres,
         )
-        for full_index, component_index, component, ct_index
-        in topo.cms_atom_index(model)
-        if full_index not in target
+        for ct_index, component in enumerate(model.comp_ct)
+        for component_index in range(1, component.atom_total + 1)
+        if (ct_index, component_index) not in component_targets
     )
     return full, components
 
@@ -569,23 +573,68 @@ def test_adapter_python_precedence_and_schrodinger_rejection(monkeypatch):
         preparation._resolve_adapter_python(schrodinger_python, child)
 
 
-def test_component_lookup_uses_documented_cms_mapping_for_nontrivial_indices(
-    monkeypatch,
-):
+def test_component_lookup_matches_noncontiguous_cms_gid_maps():
     from types import SimpleNamespace
-    from schrodinger.application.desmond.packages import topo
 
-    first = object()
-    mapped = object()
-    component = SimpleNamespace(atom_total=3, atom={1: first, 3: mapped})
-    cms_model = SimpleNamespace(atom_total=1, comp_ct=[component])
-    monkeypatch.setattr(
-        topo,
-        "cms_atom_index",
-        lambda model: iter(((1, 3, component, 0),)),
+    first = SimpleNamespace(chain="A")
+    mapped = SimpleNamespace(chain="B")
+    inactive = SimpleNamespace(chain="I")
+    components = [
+        SimpleNamespace(atom_total=2, atom={1: first, 2: mapped}),
+        SimpleNamespace(atom_total=1, atom={1: inactive}),
+    ]
+    gid_map = [-1, 42, 7]
+    cms_model = SimpleNamespace(
+        atom_total=2,
+        gid_map=gid_map,
+        gid=lambda atom_index: gid_map[atom_index],
+        comp_ct=components,
+        id_maps=[
+            SimpleNamespace(start_gid=7, to_gid=[-1, 7, 42]),
+            SimpleNamespace(start_gid=99, to_gid=[-1, 99]),
+        ],
     )
 
+    assert preparation._full_system_component_map(cms_model) == {
+        1: (0, 2),
+        2: (0, 1),
+    }
     assert preparation._component_atom(cms_model, 1) is mapped
+    preparation._component_atom(cms_model, 1).chain = "L"
+    assert components[0].atom[2].chain == "L"
+    assert components[0].atom[1].chain == "A"
+    assert components[1].atom[1].chain == "I"
+
+
+@pytest.mark.parametrize(
+    ("component_gid_maps", "message"),
+    [
+        (([-1, 7],), "absent"),
+        (([-1, 42], [-1, 42]), "ambiguous"),
+    ],
+)
+def test_component_lookup_rejects_absent_or_ambiguous_gid_mapping(
+    component_gid_maps, message
+):
+    from types import SimpleNamespace
+
+    components = [
+        SimpleNamespace(atom_total=1, atom={1: object()})
+        for _ in component_gid_maps
+    ]
+    cms_model = SimpleNamespace(
+        atom_total=1,
+        gid_map=[-1, 42],
+        gid=lambda atom_index: [-1, 42][atom_index],
+        comp_ct=components,
+        id_maps=[
+            SimpleNamespace(start_gid=None, to_gid=gid_map)
+            for gid_map in component_gid_maps
+        ],
+    )
+
+    with pytest.raises(PreparationError, match=message):
+        preparation._full_system_component_map(cms_model)
 
 
 @pytest.mark.parametrize("change", ["coordinate", "charge", "bond"])

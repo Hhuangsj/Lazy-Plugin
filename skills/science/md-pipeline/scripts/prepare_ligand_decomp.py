@@ -384,22 +384,99 @@ def _analysis_resname(group):
     return str(group["group_id"])
 
 
-def _component_atom(cms_model, full_system_index):
-    from schrodinger.application.desmond.packages import topo
-
-    matches = [
-        component.atom[component_index]
-        for fsys_index, component_index, component, _ct_index
-        in topo.cms_atom_index(cms_model)
-        if fsys_index == full_system_index
-    ]
-    if len(matches) == 1:
-        return matches[0]
-    raise PreparationError(
-        "full-system atom {} has {} component mappings".format(
-            full_system_index, len(matches)
+def _component_gids(cms_model, ct_index, component):
+    """Return component atom gids from the Cms-owned id map."""
+    try:
+        id_map = cms_model.id_maps[ct_index]
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise PreparationError(
+            "component CT {} has no Cms id map: {}".format(ct_index, exc)
         )
+
+    explicit = getattr(id_map, "to_gid", None)
+    if explicit is not None:
+        if len(explicit) < component.atom_total + 1:
+            raise PreparationError(
+                "component CT {} has a truncated id_maps.to_gid".format(
+                    ct_index
+                )
+            )
+        return tuple(
+            int(explicit[component_index])
+            for component_index in range(1, component.atom_total + 1)
+        )
+
+    start_gid = getattr(id_map, "start_gid", None)
+    if start_gid is None:
+        if (
+            len(cms_model.comp_ct) == 1
+            and component.atom_total == cms_model.atom_total
+        ):
+            return tuple(
+                int(cms_model.gid(component_index))
+                for component_index in range(1, component.atom_total + 1)
+            )
+        raise PreparationError(
+            "component CT {} has neither id_maps.to_gid nor start_gid".format(
+                ct_index
+            )
+        )
+    return tuple(
+        int(start_gid) + component_index - 1
+        for component_index in range(1, component.atom_total + 1)
     )
+
+
+def _full_system_component_map(cms_model):
+    """Match active full-system atoms to component atoms by trajectory gid."""
+    component_atoms_by_gid = {}
+    for ct_index, component in enumerate(cms_model.comp_ct):
+        for component_index, gid in enumerate(
+            _component_gids(cms_model, ct_index, component), start=1
+        ):
+            component_atoms_by_gid.setdefault(gid, []).append(
+                (ct_index, component_index)
+            )
+
+    mapping = {}
+    for full_system_index in range(1, cms_model.atom_total + 1):
+        try:
+            gid = int(cms_model.gid(full_system_index))
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            raise PreparationError(
+                "full-system atom {} has no valid gid: {}".format(
+                    full_system_index, exc
+                )
+            )
+        matches = component_atoms_by_gid.get(gid, ())
+        if not matches:
+            raise PreparationError(
+                "full-system atom {} gid {} has an absent component mapping".format(
+                    full_system_index, gid
+                )
+            )
+        if len(matches) != 1:
+            raise PreparationError(
+                "full-system atom {} gid {} has ambiguous component mappings: {}".format(
+                    full_system_index, gid, matches
+                )
+            )
+        mapping[full_system_index] = matches[0]
+    return mapping
+
+
+def _component_atom(cms_model, full_system_index, component_map=None):
+    if component_map is None:
+        component_map = _full_system_component_map(cms_model)
+    try:
+        ct_index, component_index = component_map[full_system_index]
+        return cms_model.comp_ct[ct_index].atom[component_index]
+    except (IndexError, KeyError, TypeError) as exc:
+        raise PreparationError(
+            "full-system atom {} has no usable component mapping: {}".format(
+                full_system_index, exc
+            )
+        )
 
 
 def _ct_chemistry_signature(structure):
@@ -441,10 +518,16 @@ def _atom_metadata(atom):
     )
 
 
-def _non_target_metadata_signature(cms_model, target_atom_indices):
-    from schrodinger.application.desmond.packages import topo
-
+def _non_target_metadata_signature(
+    cms_model, target_atom_indices, component_map=None
+):
     target = set(target_atom_indices)
+    if component_map is None:
+        component_map = _full_system_component_map(cms_model)
+    component_targets = {
+        component_map[full_system_index]
+        for full_system_index in target
+    }
     full_system = tuple(
         (atom.index, _atom_metadata(atom))
         for atom in cms_model.fsys_ct.atom
@@ -452,14 +535,13 @@ def _non_target_metadata_signature(cms_model, target_atom_indices):
     )
     components = tuple(
         (
-            fsys_index,
             ct_index,
             component_index,
             _atom_metadata(component.atom[component_index]),
         )
-        for fsys_index, component_index, component, ct_index
-        in topo.cms_atom_index(cms_model)
-        if fsys_index not in target
+        for ct_index, component in enumerate(cms_model.comp_ct)
+        for component_index in range(1, component.atom_total + 1)
+        if (ct_index, component_index) not in component_targets
     )
     return full_system, components
 
@@ -468,13 +550,14 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
     from schrodinger.application.desmond.packages import topo
 
     immutable_before = _immutable_cms_signature(cms_model)
+    component_map = _full_system_component_map(cms_model)
     target_atom_indices = {
         atom_index
         for group in groups
         for atom_index in group["maestro_atom_indices"]
     }
     non_target_metadata_before = _non_target_metadata_signature(
-        cms_model, target_atom_indices
+        cms_model, target_atom_indices, component_map
     )
     chain = _choose_analysis_chain(cms_model)
     selectors = []
@@ -488,7 +571,9 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
         }
         selectors.append(selector)
         for atom_index in group["maestro_atom_indices"]:
-            component_atom = _component_atom(cms_model, atom_index)
+            component_atom = _component_atom(
+                cms_model, atom_index, component_map
+            )
             component_atom.chain = chain
             component_atom.resnum = residue_number
             component_atom.inscode = " "
@@ -499,12 +584,13 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
         raise PreparationError("invalid analysis CMS output path")
     cms_model.write(str(analysis_path))
     _, written = topo.read_cms(str(analysis_path))
+    written_component_map = _full_system_component_map(written)
     if _immutable_cms_signature(written) != immutable_before:
         raise PreparationError(
             "analysis CMS changed atoms, chemistry, bonds, or coordinates"
         )
     if _non_target_metadata_signature(
-        written, target_atom_indices
+        written, target_atom_indices, written_component_map
     ) != non_target_metadata_before:
         raise PreparationError(
             "analysis CMS changed non-target residue metadata"
@@ -513,7 +599,9 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
     for group, selector in zip(groups, selectors):
         for atom_index in group["maestro_atom_indices"]:
             full_atom = written.atom[atom_index]
-            component_atom = _component_atom(written, atom_index)
+            component_atom = _component_atom(
+                written, atom_index, written_component_map
+            )
             for atom in (full_atom, component_atom):
                 actual = (
                     str(atom.chain).strip(),
