@@ -56,7 +56,7 @@ DECOMP=1 LIG_ASL='<ligand ASL>' run_mmgbsa.sh <md-dir>...
 1. Lazy-Plugin 从 CMS 中提取 ligand，生成仅含重原子的 `ligand_graph.sdf`。
 2. 同时生成 `atom_index_map.json`，保存 SDF/RDKit atom index 到原始 Maestro atom index 的一一映射。
 3. 导出后重新读取 SDF，并校验元素、形式电荷和键连接与 CMS ligand 重原子图一致。
-4. Synergy-Fragment 读取 SDF，识别有序肽主链和所有非主链连通组件，输出版本化 residue-map JSON。
+4. Synergy-Fragment 读取 SDF，识别有序肽主链和所有非主链连通组件；识别为标准蛋白氨基酸时写入规范三字母名，随后输出版本化 residue-map JSON。
 5. Lazy-Plugin 把 RDKit index 映射回 Maestro index，再把每个显式氢归属到其直接相连重原子的 group。
 6. Lazy-Plugin 生成新的分析 CMS 副本，只更新 residue name、number、chain 等 metadata；原子顺序、坐标、键和力场参数保持不变。
 7. thermal MM/GBSA 使用分析 CMS 副本和原始轨迹。
@@ -80,10 +80,12 @@ XLINK_000, XLINK_001, ...
 ```
 
 - `group_id` 不随后续名称修订而改变。
-- `group_name` 可以是 Synergy 识别名称、原始 residue 名称或空字符串。
+- `group_name` 对识别成功的 20 种标准蛋白源氨基酸（19 种 L 型及无手性的 Gly）使用规范三字母名，例如 `ALA`、`PHE`、`LYS`；D 型、N-甲基化和其他修饰结构不冒充标准 L-氨基酸。
+- pre-resolved 模式保留输入中的原始 residue 名称；非标准 single-UNK 分组可以使用 Synergy 的非标准名称或空字符串，后续允许映射更新。
 - unknown、立体匹配不完整和 crosslinked 状态保存在独立字段和 warnings 中，不编码进 `group_id`。
 - 交联组件的所有原子只进入对应 `XLINK_nnn`，不同时计入被连接的 `Pxxx`。
 - 每个显式氢跟随其唯一相连的重原子 group。
+- single-UNK 分析 CMS 中，已识别的标准氨基酸 residue metadata 使用同一规范三字母名；未识别分组使用稳定位置标签。该改名只作用于分析副本，不改变原始 MD 文件。
 
 ## 6. Synergy residue-map 契约
 
@@ -106,6 +108,7 @@ Synergy-Fragment 提供一个非交互 CLI，输入 `ligand_graph.sdf`，输出 
 - `rdkit_atom_indices`
 - `sequence_index`
 - `display_name`
+- `canonical_resname`：标准蛋白氨基酸为规范三字母名，否则为 `null`
 - `recognition_status`
 - `residue_smiles`
 - `connected_group_ids`
@@ -212,6 +215,7 @@ Lazy-Plugin 更新以下说明：
 - 线性标准肽；
 - Ac/NH2 等封端；
 - unknown 非天然残基；
+- 20 种标准蛋白源氨基酸的规范三字母命名，以及 D 型/N-甲基化结构不被误标为标准 L-氨基酸；
 - 头尾环肽；
 - 二硫键和非二硫侧链交联；
 - 交联原子进入独立 `XLINK_nnn`；
