@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import multiprocessing
 import subprocess
 import sys
 from collections import OrderedDict
@@ -42,8 +43,11 @@ def test_maestro_partition_accepts_exact_one_based_group_union():
     contract = _module()
 
     assert contract.validate_maestro_partition(
-        {"P000": [1, 2], "N_CAP": [3]},
         [1, 2, 3],
+        [
+            {"group_id": "P000", "maestro_atom_indices": [1, 2]},
+            {"group_id": "N_CAP", "maestro_atom_indices": [3]},
+        ],
     ) is None
 
 
@@ -63,19 +67,145 @@ def test_maestro_partition_rejects_zero_missing_extra_or_duplicate_atoms(
     contract = _module()
 
     with pytest.raises(contract.ContractError):
-        contract.validate_maestro_partition(ligand_atoms, groups)
+        contract.validate_maestro_partition(
+            ligand_atoms,
+            [{"group_id": group_id, "maestro_atom_indices": atoms} for group_id, atoms in groups.items()],
+        )
 
 
 def test_maestro_partition_reads_one_based_atoms_from_group_records():
     contract = _module()
 
     assert contract.validate_maestro_partition(
+        [1, 2, 3],
         [
             {"group_id": "P000", "maestro_atom_indices": [1, 2]},
             {"group_id": "C_CAP", "maestro_atom_indices": [3]},
         ],
-        [1, 2, 3],
     ) is None
+
+
+def test_maestro_partition_rejects_raw_iterable_group_shape():
+    contract = _module()
+
+    with pytest.raises(contract.ContractError):
+        contract.validate_maestro_partition({1, 2}, [[1], [2]])
+
+
+def _delayed_load_worker(
+    manifest_path, target_status, barrier, first_loaded, second_started, results
+):
+    contract = _module()
+    original_atomic_write_json = contract.atomic_write_json
+
+    def delayed_atomic_write_json(path, payload):
+        if payload.get("status") in ("success", "failed"):
+            first_loaded.set()
+            assert second_started.wait(timeout=5)
+        return original_atomic_write_json(path, payload)
+
+    barrier.wait()
+    if target_status == "success":
+        contract.atomic_write_json = delayed_atomic_write_json
+    else:
+        assert first_loaded.wait(timeout=5)
+        second_started.set()
+    try:
+        if target_status == "failed":
+            contract.update_manifest(
+                manifest_path,
+                target_status,
+                stage="race",
+                return_code=1,
+                log="race.log",
+            )
+        else:
+            contract.update_manifest(manifest_path, target_status)
+    except contract.ContractError as exc:
+        results.put(("error", str(exc)))
+    else:
+        results.put(("ok", target_status))
+
+
+def test_concurrent_terminal_writers_allow_one_transition_only(tmp_path):
+    contract = _module()
+    manifest_path = tmp_path / "manifest.json"
+    contract.initialize_manifest(manifest_path)
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    first_loaded = context.Event()
+    second_started = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_delayed_load_worker,
+            args=(
+                str(manifest_path),
+                status,
+                barrier,
+                first_loaded,
+                second_started,
+                results,
+            ),
+        )
+        for status in ("success", "failed")
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=5)
+    for process in processes:
+        assert process.exitcode == 0
+
+    outcomes = [results.get(timeout=1) for _ in processes]
+    assert sorted(outcome[0] for outcome in outcomes) == ["error", "ok"]
+    winning_status = next(outcome[1] for outcome in outcomes if outcome[0] == "ok")
+    assert contract.load_json(manifest_path)["status"] == winning_status
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_atomic_json_write_serialization_failure_preserves_destination(tmp_path):
+    contract = _module()
+    output = tmp_path / "manifest.json"
+    output.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(contract.ContractError):
+        contract.atomic_write_json(output, {"not-json": object()})
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
+def test_atomic_json_write_replace_failure_preserves_destination(tmp_path, monkeypatch):
+    contract = _module()
+    output = tmp_path / "manifest.json"
+    output.write_text("original\n", encoding="utf-8")
+
+    def fail_replace(source, destination):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(contract.os, "replace", fail_replace)
+    with pytest.raises(contract.ContractError):
+        contract.atomic_write_json(output, {"new": True})
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
+def test_atomic_json_write_fsync_failure_preserves_destination(tmp_path, monkeypatch):
+    contract = _module()
+    output = tmp_path / "manifest.json"
+    output.write_text("original\n", encoding="utf-8")
+
+    def fail_fsync(file_descriptor):
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(contract.os, "fsync", fail_fsync)
+    with pytest.raises(contract.ContractError):
+        contract.atomic_write_json(output, {"new": True})
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert list(output.parent.glob(".*.tmp")) == []
 
 
 def test_atomic_json_write_replaces_destination_without_leaving_temp(tmp_path):

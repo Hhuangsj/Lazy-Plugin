@@ -10,9 +10,15 @@ import argparse
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from collections.abc import Mapping
 from numbers import Integral
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Schrödinger's supported hosts are POSIX.
+    fcntl = None
 
 
 DEFAULT_PROPERTIES = {
@@ -57,42 +63,23 @@ def _normalise_atom_indices(values, label):
     return set(values)
 
 
-def _group_atom_values(group):
-    if isinstance(group, Mapping):
-        for key in (
-            "maestro_atom_indices",
-            "maestro_atom_ids",
-            "atom_indices_one_based",
-            "atom_indices",
-        ):
-            if key in group:
-                return group[key]
-        raise ContractError(
-            "group record must contain maestro_atom_indices (one-based)"
-        )
-    return group
-
-
 def _normalise_groups(groups):
-    if isinstance(groups, Mapping):
-        records = groups.items()
-    else:
-        if isinstance(groups, (str, bytes)):
-            raise ContractError("groups must be a mapping or iterable of group records")
-        try:
-            records = enumerate(groups)
-        except TypeError:
-            raise ContractError("groups must be a mapping or iterable of group records")
+    if isinstance(groups, (str, bytes, Mapping)):
+        raise ContractError("groups must be an iterable of mapping records")
+    try:
+        records = list(groups)
+    except TypeError:
+        raise ContractError("groups must be an iterable of mapping records")
 
     normalised = []
     seen_group_ids = set()
-    for group_id, group in records:
-        if isinstance(groups, Mapping):
-            current_id = group_id
-            atom_values = group
-        else:
-            current_id = group.get("group_id", group_id) if isinstance(group, Mapping) else group_id
-            atom_values = _group_atom_values(group)
+    for position, group in enumerate(records):
+        if not isinstance(group, Mapping) or "maestro_atom_indices" not in group:
+            raise ContractError(
+                "each group must be a mapping with maestro_atom_indices"
+            )
+        current_id = group.get("group_id", position)
+        atom_values = group["maestro_atom_indices"]
         if current_id in seen_group_ids:
             raise ContractError("duplicate group id: {}".format(current_id))
         seen_group_ids.add(current_id)
@@ -105,31 +92,13 @@ def _normalise_groups(groups):
     return normalised
 
 
-def validate_maestro_partition(groups, ligand_atom_indices):
+def validate_maestro_partition(ligand_atom_indices, groups):
     """Validate an exact partition of a ligand's one-based Maestro atom IDs.
 
-    groups may be a group_id-to-atom-ids mapping or records containing
+    groups must be an iterable of mapping records containing
     maestro_atom_indices. Every ligand atom must occur exactly once, and
     zero-based, non-integral, missing, extra, or duplicate IDs are rejected.
     """
-    # Accept the natural alternate positional order as well; keyword callers
-    # remain unambiguous and future preparation code can use either convention.
-    if not isinstance(groups, Mapping) and not isinstance(groups, (str, bytes)):
-        try:
-            first_items = list(groups)
-        except TypeError:
-            raise ContractError("groups must be a mapping or iterable of group records")
-        groups = first_items
-        if first_items and all(_is_atom_index(item) for item in first_items):
-            try:
-                second_is_groups = isinstance(ligand_atom_indices, Mapping) or any(
-                    isinstance(item, Mapping) for item in ligand_atom_indices
-                )
-            except TypeError:
-                second_is_groups = False
-            if second_is_groups:
-                groups, ligand_atom_indices = ligand_atom_indices, first_items
-
     ligand_set = _normalise_atom_indices(ligand_atom_indices, "ligand atom set")
     if not ligand_set:
         raise ContractError("ligand atom set must not be empty")
@@ -161,7 +130,7 @@ def atomic_write_json(path, payload):
         raise ContractError("output directory does not exist: {}".format(output.parent))
     try:
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ContractError("payload is not JSON serializable: {}".format(exc))
 
     file_descriptor, temporary_name = tempfile.mkstemp(
@@ -178,12 +147,32 @@ def atomic_write_json(path, payload):
             os.unlink(temporary_name)
         except OSError:
             pass
-        raise
+        raise ContractError("atomic JSON write failed") from None
 
 
 def load_json(path):
     with Path(path).open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+@contextmanager
+def _manifest_lock(manifest_path):
+    """Serialize manifest operations without leaving a lock-file artifact."""
+    if fcntl is None:
+        raise ContractError("manifest locking requires a POSIX fcntl implementation")
+    parent = Path(manifest_path).parent
+    if not parent.is_dir():
+        raise ContractError("manifest directory does not exist: {}".format(parent))
+    lock_fd = os.open(str(parent), os.O_RDONLY)
+    locked = False
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def _copy_properties(properties):
@@ -208,26 +197,27 @@ def initialize_manifest(
 ):
     """Create schema-v1 in the only non-terminal state: running."""
     path = Path(manifest_path)
-    if path.exists():
-        raise ContractError("manifest already exists: {}".format(path))
-    if "asl" in extra_fields and ligand_asl is None:
-        ligand_asl = extra_fields.pop("asl")
+    with _manifest_lock(path):
+        if path.exists():
+            raise ContractError("manifest already exists: {}".format(path))
+        if "asl" in extra_fields and ligand_asl is None:
+            ligand_asl = extra_fields.pop("asl")
 
-    manifest = {
-        "schema_version": 1,
-        "status": "running",
-        "paths": dict(paths or {}),
-        "ligand_asl": ligand_asl,
-        "frames": dict(frames or {}),
-        "properties": _copy_properties(properties),
-        "versions": dict(versions or {}),
-    }
-    for key, value in extra_fields.items():
-        if key in manifest or key == "status":
-            raise ContractError("cannot override manifest field: {}".format(key))
-        manifest[key] = value
-    atomic_write_json(path, manifest)
-    return manifest
+        manifest = {
+            "schema_version": 1,
+            "status": "running",
+            "paths": dict(paths or {}),
+            "ligand_asl": ligand_asl,
+            "frames": dict(frames or {}),
+            "properties": _copy_properties(properties),
+            "versions": dict(versions or {}),
+        }
+        for key, value in extra_fields.items():
+            if key in manifest or key == "status":
+                raise ContractError("cannot override manifest field: {}".format(key))
+            manifest[key] = value
+        atomic_write_json(path, manifest)
+        return manifest
 
 
 def _coerce_return_code(value):
@@ -277,48 +267,51 @@ def update_manifest(
     if status not in _VALID_STATUSES:
         raise ContractError("invalid manifest status: {}".format(status))
     path = Path(manifest_path)
-    if path.exists():
-        try:
-            manifest = load_json(path)
-        except (OSError, ValueError, TypeError) as exc:
-            raise ContractError("cannot load manifest {}: {}".format(path, exc))
-        if not isinstance(manifest, dict):
-            raise ContractError("manifest must contain a JSON object")
-    else:
-        manifest = {"schema_version": 1}
+    with _manifest_lock(path):
+        if path.exists():
+            try:
+                manifest = load_json(path)
+            except (OSError, ValueError, TypeError) as exc:
+                raise ContractError("cannot load manifest {}: {}".format(path, exc))
+            if not isinstance(manifest, dict):
+                raise ContractError("manifest must contain a JSON object")
+        else:
+            manifest = {"schema_version": 1}
 
-    current = manifest.get("status")
-    if current is None:
-        allowed = {"running"}
-    elif current == "running":
-        allowed = {"running", "success", "failed"}
-    elif current in _TERMINAL_STATUSES:
-        allowed = set()
-    else:
-        raise ContractError("invalid current manifest status: {}".format(current))
-    if status not in allowed:
-        raise ContractError("manifest transition {} -> {} is not allowed".format(current, status))
+        current = manifest.get("status")
+        if current is None:
+            allowed = {"running"}
+        elif current == "running":
+            allowed = {"running", "success", "failed"}
+        elif current in _TERMINAL_STATUSES:
+            allowed = set()
+        else:
+            raise ContractError("invalid current manifest status: {}".format(current))
+        if status not in allowed:
+            raise ContractError(
+                "manifest transition {} -> {} is not allowed".format(current, status)
+            )
 
-    if status == "failed":
-        if failure is not None and error is not None:
-            raise ContractError("use either failure or error")
-        manifest["error"] = _build_failure(
-            error if error is not None else failure,
-            stage,
-            return_code,
-            log,
-        )
-    elif any(value is not None for value in (failure, error, stage, return_code, log)):
-        raise ContractError("failure details are only valid for failed status")
+        if status == "failed":
+            if failure is not None and error is not None:
+                raise ContractError("use either failure or error")
+            manifest["error"] = _build_failure(
+                error if error is not None else failure,
+                stage,
+                return_code,
+                log,
+            )
+        elif any(value is not None for value in (failure, error, stage, return_code, log)):
+            raise ContractError("failure details are only valid for failed status")
 
-    for key, value in updates.items():
-        if key in ("schema_version", "status", "failure", "error"):
-            raise ContractError("cannot override manifest field: {}".format(key))
-        manifest[key] = value
-    manifest["schema_version"] = 1
-    manifest["status"] = status
-    atomic_write_json(path, manifest)
-    return manifest
+        for key, value in updates.items():
+            if key in ("schema_version", "status", "failure", "error"):
+                raise ContractError("cannot override manifest field: {}".format(key))
+            manifest[key] = value
+        manifest["schema_version"] = 1
+        manifest["status"] = status
+        atomic_write_json(path, manifest)
+        return manifest
 
 
 def _build_parser():
