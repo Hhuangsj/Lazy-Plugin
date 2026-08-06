@@ -2,7 +2,9 @@ import base64
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 
 import pytest
@@ -85,6 +87,23 @@ def _write_two_water_cms(path):
     return path
 
 
+def _write_bonded_ligand_cms(path, pdbres="UNK"):
+    from schrodinger.application.desmond.packages import topo
+
+    _write_two_water_cms(path)
+    _, model = topo.read_cms(str(path))
+    for atom_index in range(1, 7):
+        atom = model.comp_ct[0].atom[atom_index]
+        atom.pdbres = pdbres
+        atom.resnum = 7
+    for atom_index in (1, 4):
+        model.comp_ct[0].atom[atom_index].formal_charge = 1
+    model.comp_ct[0].addBond(1, 4, 1)
+    model.synchronize_fsys_ct()
+    model.write(str(path))
+    return path
+
+
 def _relabel_first_molecule(path, pdbres):
     from schrodinger.application.desmond.packages import topo
 
@@ -97,39 +116,71 @@ def _relabel_first_molecule(path, pdbres):
     model.write(str(path))
 
 
+def _ct_chemistry_signature(structure):
+    atoms = tuple(
+        (atom.element, atom.formal_charge, tuple(atom.xyz))
+        for atom in structure.atom
+    )
+    bonds = tuple(sorted(
+        (
+            min(bond.atom1.index, bond.atom2.index),
+            max(bond.atom1.index, bond.atom2.index),
+            float(bond.order),
+        )
+        for bond in structure.bond
+    ))
+    return structure.atom_total, atoms, bonds
+
+
 def _immutable_cms_signature(path):
     from schrodinger.application.desmond.packages import topo
 
     _, model = topo.read_cms(str(path))
-    atoms = tuple(
+    return (
+        _ct_chemistry_signature(model.fsys_ct),
+        tuple(_ct_chemistry_signature(component) for component in model.comp_ct),
+    )
+
+
+def _non_target_metadata_signature(path, target_indices):
+    from schrodinger.application.desmond.packages import topo
+
+    _, model = topo.read_cms(str(path))
+    target = set(target_indices)
+    full = tuple(
+        (atom.index, atom.chain, atom.resnum, atom.inscode, atom.pdbres)
+        for atom in model.fsys_ct.atom
+        if atom.index not in target
+    )
+    components = tuple(
         (
-            atom.element,
-            atom.formal_charge,
-            tuple(atom.xyz),
+            full_index,
+            ct_index,
+            component_index,
+            component.atom[component_index].chain,
+            component.atom[component_index].resnum,
+            component.atom[component_index].inscode,
+            component.atom[component_index].pdbres,
         )
-        for atom in model.atom
+        for full_index, component_index, component, ct_index
+        in topo.cms_atom_index(model)
+        if full_index not in target
     )
-    bonds = tuple(
-        sorted(
-            (
-                min(bond.atom1.index, bond.atom2.index),
-                max(bond.atom1.index, bond.atom2.index),
-                float(bond.order),
-            )
-            for bond in model.bond
-        )
-    )
-    return model.atom_total, atoms, bonds
+    return full, components
 
 
-def _write_fake_adapter(path, exit_code=0):
+def _write_fake_adapter(
+    path, exit_code=0, malformed_group=False, record_python=False
+):
     if exit_code:
         body = "import sys\nraise SystemExit({})\n".format(exit_code)
     else:
         body = """\
 import argparse
 import json
+import sys
 from pathlib import Path
+from rdkit import Chem
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--sdf', required=True)
@@ -138,14 +189,15 @@ parser.add_argument('--synergy-dir', required=True)
 args = parser.parse_args()
 if not Path(args.synergy_dir).is_dir():
     raise SystemExit(9)
+mol = next(mol for mol in Chem.SDMolSupplier(args.sdf, removeHs=False) if mol)
 payload = {
     'schema_version': 1,
     'status': 'ok',
-    'source_atom_count': 1,
+    'source_atom_count': mol.GetNumAtoms(),
     'groups': [{
         'group_id': 'P000',
         'group_type': 'residue',
-        'rdkit_atom_indices': [0],
+        'rdkit_atom_indices': list(range(mol.GetNumAtoms())),
         'sequence_index': 0,
         'display_name': 'ALA',
         'canonical_resname': 'ALA',
@@ -157,10 +209,17 @@ payload = {
     'unassigned_atom_indices': [],
     'duplicate_atom_indices': [],
     'topology': {'is_cyclic': False},
-    'mapper_version': 'fake-adapter/1',
+    'mapper_version': str(Path(sys.executable).resolve()) if RECORD_PYTHON else 'fake-adapter/1',
 }
+if MALFORMED_GROUP:
+    payload['groups'] = [{
+        'group_id': 'P000',
+        'rdkit_atom_indices': list(range(mol.GetNumAtoms())),
+    }]
 Path(args.output).write_text(json.dumps(payload), encoding='utf-8')
-"""
+""".replace("RECORD_PYTHON", repr(record_python)).replace(
+            "MALFORMED_GROUP", repr(malformed_group)
+        )
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -293,6 +352,7 @@ def test_pre_resolved_selector_collision_writes_metadata_only_analysis_cms(
     source.chmod(0o444)
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     source_signature = _immutable_cms_signature(source)
+    non_target_metadata = _non_target_metadata_signature(source, {1, 2, 3})
     output_dir = tmp_path / "pre-output"
 
     result = preparation.prepare_ligand_decomp(
@@ -305,6 +365,9 @@ def test_pre_resolved_selector_collision_writes_metadata_only_analysis_cms(
     assert result["mode"] == "pre_resolved"
     assert Path(result["analysis_cms"]) != source
     assert _immutable_cms_signature(result["analysis_cms"]) == source_signature
+    assert _non_target_metadata_signature(
+        result["analysis_cms"], {1, 2, 3}
+    ) == non_target_metadata
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_digest
 
     residue_map = json.loads(
@@ -336,6 +399,9 @@ def test_pre_resolved_selector_collision_writes_metadata_only_analysis_cms(
     assert analysis.atom[1].chain == "L"
     assert analysis.atom[1].resnum == 1
     assert analysis.atom[1].pdbres.strip() == "SPC"
+    assert analysis.comp_ct[0].atom[1].chain == "L"
+    assert analysis.comp_ct[0].atom[1].resnum == 1
+    assert analysis.comp_ct[0].atom[1].pdbres.strip() == "SPC"
     manifest = json.loads(
         (output_dir / "decomp_manifest.json").read_text(encoding="utf-8")
     )
@@ -343,28 +409,29 @@ def test_pre_resolved_selector_collision_writes_metadata_only_analysis_cms(
     assert manifest["mode"] == "pre_resolved"
 
 
-def test_single_unk_invokes_plain_python_adapter_and_maps_all_atoms(
+def test_default_adapter_python_is_outside_schrodinger_and_imports_rdkit(
     tmp_path, monkeypatch
 ):
     from schrodinger.application.desmond.packages import topo
 
-    source = _write_two_water_cms(tmp_path / "source.cms")
-    _relabel_first_molecule(source, "UNK")
+    source = _write_bonded_ligand_cms(tmp_path / "source.cms")
     source.chmod(0o444)
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     source_signature = _immutable_cms_signature(source)
-    fake_adapter = _write_fake_adapter(tmp_path / "fake_adapter.py")
+    fake_adapter = _write_fake_adapter(
+        tmp_path / "fake_adapter.py", record_python=True
+    )
     synergy_dir = tmp_path / "synergy-read-only"
     synergy_dir.mkdir()
     synergy_dir.chmod(0o555)
     monkeypatch.setattr(preparation, "ADAPTER_SCRIPT", fake_adapter)
-    monkeypatch.setenv("SYNERGY_ADAPTER_PYTHON", "/usr/bin/python3")
+    monkeypatch.delenv("SYNERGY_ADAPTER_PYTHON", raising=False)
     monkeypatch.setenv("SYNERGY_FRAGMENT_DIR", str(synergy_dir))
     output_dir = tmp_path / "single-output"
 
     result = preparation.prepare_ligand_decomp(
         source,
-        ligand_asl="atom.num 1-3",
+        ligand_asl="atom.num 1-6",
         output_dir=output_dir,
     )
 
@@ -374,8 +441,11 @@ def test_single_unk_invokes_plain_python_adapter_and_maps_all_atoms(
     residue_map = json.loads(
         (output_dir / "residue_map.json").read_text(encoding="utf-8")
     )
-    assert residue_map["mapper_version"] == "fake-adapter/1"
-    assert residue_map["groups"][0]["maestro_atom_indices"] == [1, 2, 3]
+    child_executable = Path(residue_map["mapper_version"]).resolve()
+    schrodinger_root = Path(os.environ["SCHRODINGER"]).resolve()
+    assert child_executable != schrodinger_root
+    assert schrodinger_root not in child_executable.parents
+    assert residue_map["groups"][0]["maestro_atom_indices"] == [1, 2, 3, 4, 5, 6]
     assert residue_map["groups"][0]["selector"] == {
         "chain": "L",
         "resnum": 1,
@@ -384,7 +454,7 @@ def test_single_unk_invokes_plain_python_adapter_and_maps_all_atoms(
     }
 
     _, analysis = topo.read_cms(result["analysis_cms"])
-    assert analysis.select_atom(result["analysis_ligand_asl"]) == [1, 2, 3]
+    assert analysis.select_atom(result["analysis_ligand_asl"]) == [1, 2, 3, 4, 5, 6]
     assert analysis.atom[1].pdbres.strip() == "ALA"
 
 
@@ -397,6 +467,7 @@ def test_adapter_failure_transitions_running_manifest_to_failed(
     synergy_dir = tmp_path / "synergy"
     synergy_dir.mkdir()
     monkeypatch.setattr(preparation, "ADAPTER_SCRIPT", fake_adapter)
+    monkeypatch.delenv("SYNERGY_ADAPTER_PYTHON", raising=False)
     output_dir = tmp_path / "failed-output"
 
     with pytest.raises(PreparationError, match="adapter failed with exit code 7"):
@@ -405,7 +476,6 @@ def test_adapter_failure_transitions_running_manifest_to_failed(
             ligand_asl="atom.num 1-3",
             output_dir=output_dir,
             synergy_dir=synergy_dir,
-            adapter_python="/usr/bin/python3",
         )
 
     manifest = json.loads(
@@ -413,3 +483,265 @@ def test_adapter_failure_transitions_running_manifest_to_failed(
     )
     assert manifest["status"] == "failed"
     assert manifest["error"]["stage"] == "single_unk_mapping"
+
+
+def test_real_cms_export_persists_two_heavy_atoms_in_fixed_bonded_order(tmp_path):
+    from rdkit import Chem
+
+    source = _write_bonded_ligand_cms(tmp_path / "source.cms", pdbres="LIG")
+    output_dir = tmp_path / "bonded-output"
+
+    preparation.prepare_ligand_decomp(
+        source,
+        ligand_asl="atom.num 1-6",
+        output_dir=output_dir,
+    )
+
+    assert json.loads(
+        (output_dir / "atom_index_map.json").read_text(encoding="utf-8")
+    ) == {"0": 1, "1": 4}
+    records = list(Chem.SDMolSupplier(
+        str(output_dir / "ligand_graph.sdf"), removeHs=False, sanitize=True
+    ))
+    assert len(records) == 1
+    assert [atom.GetSymbol() for atom in records[0].GetAtoms()] == ["O", "O"]
+    assert [atom.GetFormalCharge() for atom in records[0].GetAtoms()] == [1, 1]
+    assert [
+        (
+            bond.GetBeginAtomIdx(),
+            bond.GetEndAtomIdx(),
+            bond.GetBondTypeAsDouble(),
+        )
+        for bond in records[0].GetBonds()
+    ] == [(0, 1, 1.0)]
+
+
+def test_default_child_environment_preserves_unrelated_user_python_config(
+    tmp_path, monkeypatch
+):
+    schrodinger_root = tmp_path / "schrodinger"
+    schrodinger_bin = schrodinger_root / "internal" / "bin"
+    schrodinger_python = schrodinger_root / "python"
+    user_bin = tmp_path / "user-bin"
+    user_python = tmp_path / "user-python"
+    user_lib = tmp_path / "user-lib"
+    for path in (schrodinger_bin, schrodinger_python, user_bin, user_python, user_lib):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SCHRODINGER", str(schrodinger_root))
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join((str(schrodinger_bin), str(user_bin)))
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join((str(schrodinger_python), str(user_python)))
+    )
+    monkeypatch.setenv("LD_LIBRARY_PATH", os.pathsep.join((
+        str(schrodinger_root / "internal" / "lib"), str(user_lib)
+    )))
+    monkeypatch.setenv("PYTHONHOME", str(schrodinger_root / "internal"))
+    monkeypatch.setenv("PYTHONSTARTUP", "/user/startup.py")
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("USER_PYTHON_CONFIG", "keep-me")
+
+    child = preparation._plain_python_environment()
+
+    assert child["PATH"] == str(user_bin)
+    assert child["PYTHONPATH"] == str(user_python)
+    assert child["LD_LIBRARY_PATH"] == str(user_lib)
+    assert "PYTHONHOME" not in child
+    assert child["PYTHONSTARTUP"] == "/user/startup.py"
+    assert child["PYTHONNOUSERSITE"] == "1"
+    assert child["USER_PYTHON_CONFIG"] == "keep-me"
+
+
+def test_adapter_python_precedence_and_schrodinger_rejection(monkeypatch):
+    child = preparation._plain_python_environment()
+    ordinary = Path(shutil.which("python3", path=child["PATH"])).resolve()
+    child["SYNERGY_ADAPTER_PYTHON"] = "/definitely/not/the-explicit-python"
+
+    assert preparation._resolve_adapter_python(
+        ordinary, child
+    ) == ordinary
+
+    schrodinger_python = (
+        Path(os.environ["SCHRODINGER"]) / "internal" / "bin" / "python3"
+    )
+    with pytest.raises(PreparationError, match="outside SCHRODINGER"):
+        preparation._resolve_adapter_python(schrodinger_python, child)
+
+
+def test_component_lookup_uses_documented_cms_mapping_for_nontrivial_indices(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from schrodinger.application.desmond.packages import topo
+
+    first = object()
+    mapped = object()
+    component = SimpleNamespace(atom_total=3, atom={1: first, 3: mapped})
+    cms_model = SimpleNamespace(atom_total=1, comp_ct=[component])
+    monkeypatch.setattr(
+        topo,
+        "cms_atom_index",
+        lambda model: iter(((1, 3, component, 0),)),
+    )
+
+    assert preparation._component_atom(cms_model, 1) is mapped
+
+
+@pytest.mark.parametrize("change", ["coordinate", "charge", "bond"])
+def test_cms_signature_detects_component_only_chemistry_change(tmp_path, change):
+    from schrodinger.application.desmond.packages import topo
+
+    source = _write_two_water_cms(tmp_path / "source.cms")
+    _, original = topo.read_cms(str(source))
+    _, component_changed = topo.read_cms(str(source))
+    if change == "coordinate":
+        component_changed.comp_ct[0].atom[4].x += 2.0
+    elif change == "charge":
+        component_changed.comp_ct[0].atom[4].formal_charge = 1
+    else:
+        next(iter(component_changed.comp_ct[0].bond)).order = 2
+
+    assert preparation._immutable_cms_signature(
+        component_changed
+    ) != preparation._immutable_cms_signature(original)
+
+
+def test_non_target_metadata_signature_covers_component_view(tmp_path):
+    from schrodinger.application.desmond.packages import topo
+
+    source = _write_two_water_cms(tmp_path / "source.cms")
+    _, original = topo.read_cms(str(source))
+    _, metadata_changed = topo.read_cms(str(source))
+    metadata_changed.comp_ct[0].atom[4].chain = "Z"
+
+    assert preparation._non_target_metadata_signature(
+        metadata_changed, {1, 2, 3}
+    ) != preparation._non_target_metadata_signature(original, {1, 2, 3})
+
+
+def test_output_inside_synergy_is_rejected_before_any_write(tmp_path):
+    source = _write_two_water_cms(tmp_path / "source.cms")
+    synergy_dir = tmp_path / "synergy"
+    synergy_dir.mkdir()
+    marker = synergy_dir / "marker.txt"
+    marker.write_text("unchanged\n", encoding="utf-8")
+    output_dir = synergy_dir / "results"
+
+    with pytest.raises(PreparationError, match="path domains"):
+        preparation.prepare_ligand_decomp(
+            source,
+            ligand_asl="atom.num 1-3",
+            output_dir=output_dir,
+            synergy_dir=synergy_dir,
+        )
+
+    assert not output_dir.exists()
+    assert marker.read_text(encoding="utf-8") == "unchanged\n"
+    assert sorted(path.name for path in synergy_dir.iterdir()) == ["marker.txt"]
+
+
+def test_source_artifact_collision_is_rejected_before_any_write(tmp_path):
+    output_dir = tmp_path / "domain"
+    output_dir.mkdir()
+    source = _write_two_water_cms(output_dir / "analysis.cms")
+    source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    with pytest.raises(PreparationError, match="path domains"):
+        preparation.prepare_ligand_decomp(
+            source,
+            ligand_asl="atom.num 1-3",
+            output_dir=output_dir,
+        )
+
+    assert sorted(path.name for path in output_dir.iterdir()) == ["analysis.cms"]
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_digest
+
+
+def test_unexpected_exception_after_initialize_marks_manifest_failed(
+    tmp_path, monkeypatch
+):
+    source = _write_two_water_cms(tmp_path / "source.cms")
+    output_dir = tmp_path / "unexpected-output"
+
+    def raise_unexpected(*args, **kwargs):
+        raise RuntimeError("injected unexpected failure")
+
+    monkeypatch.setattr(preparation, "_export_heavy_graph", raise_unexpected)
+    with pytest.raises(PreparationError, match="injected unexpected failure"):
+        preparation.prepare_ligand_decomp(
+            source,
+            ligand_asl="atom.num 1-3",
+            output_dir=output_dir,
+        )
+
+    manifest = json.loads(
+        (output_dir / "decomp_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["stage"] == "heavy_graph_export"
+
+
+def test_malformed_adapter_group_fails_schema_before_field_access(
+    tmp_path, monkeypatch
+):
+    source = _write_bonded_ligand_cms(tmp_path / "source.cms")
+    fake_adapter = _write_fake_adapter(
+        tmp_path / "malformed_adapter.py", malformed_group=True
+    )
+    synergy_dir = tmp_path / "synergy"
+    synergy_dir.mkdir()
+    monkeypatch.setattr(preparation, "ADAPTER_SCRIPT", fake_adapter)
+    monkeypatch.delenv("SYNERGY_ADAPTER_PYTHON", raising=False)
+    output_dir = tmp_path / "malformed-output"
+
+    with pytest.raises(PreparationError, match="adapter group 0 missing required fields"):
+        preparation.prepare_ligand_decomp(
+            source,
+            ligand_asl="atom.num 1-6",
+            output_dir=output_dir,
+            synergy_dir=synergy_dir,
+        )
+
+    manifest = json.loads(
+        (output_dir / "decomp_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["stage"] == "single_unk_mapping"
+
+
+def test_already_failed_manifest_is_not_transitioned_again(
+    tmp_path, monkeypatch
+):
+    from mmgbsa_decomp_contract import update_manifest
+
+    source = _write_two_water_cms(tmp_path / "source.cms")
+    output_dir = tmp_path / "already-failed-output"
+    manifest_path = output_dir / "decomp_manifest.json"
+    injected_log = output_dir / "injected.log"
+
+    def fail_terminally(*args, **kwargs):
+        update_manifest(
+            manifest_path,
+            "failed",
+            stage="injected_terminal",
+            return_code=17,
+            log=str(injected_log),
+        )
+        raise RuntimeError("failure after terminal transition")
+
+    monkeypatch.setattr(preparation, "_export_heavy_graph", fail_terminally)
+    with pytest.raises(PreparationError, match="failure after terminal transition"):
+        preparation.prepare_ligand_decomp(
+            source,
+            ligand_asl="atom.num 1-3",
+            output_dir=output_dir,
+        )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["error"] == {
+        "stage": "injected_terminal",
+        "return_code": 17,
+        "log": str(injected_log),
+    }

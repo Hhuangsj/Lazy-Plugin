@@ -9,11 +9,12 @@
 from __future__ import absolute_import
 
 import argparse
-import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from mmgbsa_decomp_contract import (
@@ -28,10 +29,56 @@ from mmgbsa_decomp_contract import (
 
 ADAPTER_SCRIPT = Path(__file__).resolve().with_name("synergy_residue_adapter.py")
 _ANALYSIS_CHAIN_CANDIDATES = ("L", "B", "C", "D", "E")
+_OUTPUT_ARTIFACT_NAMES = (
+    "decomp_manifest.json",
+    "prepare_ligand_decomp.log",
+    "residue_map.json",
+    "atom_index_map.json",
+    "ligand_graph.sdf",
+    "prepare_result.json",
+    "analysis.cms",
+)
+_LIBRARY_PATH_VARIABLES = (
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "LIBPATH",
+    "SHLIB_PATH",
+)
 
 
 class PreparationError(RuntimeError):
     """Raised when ligand preparation cannot satisfy the mapping contract."""
+
+
+def _is_same_or_within(path, directory):
+    try:
+        Path(path).relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def _candidate_synergy_path(synergy_dir):
+    value = synergy_dir or os.environ.get("SYNERGY_FRAGMENT_DIR")
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def _validate_path_domains(source_path, output_path, synergy_path):
+    artifacts = tuple(output_path / name for name in _OUTPUT_ARTIFACT_NAMES)
+    if output_path == source_path or source_path in artifacts:
+        raise PreparationError(
+            "path domains overlap: an output path would overwrite source CMS {}"
+            .format(source_path)
+        )
+    if synergy_path is not None and _is_same_or_within(
+        output_path, synergy_path
+    ):
+        raise PreparationError(
+            "path domains overlap: output directory {} is inside read-only "
+            "Synergy directory {}".format(output_path, synergy_path)
+        )
 
 
 def detect_mode_from_residues(residues):
@@ -338,27 +385,31 @@ def _analysis_resname(group):
 
 
 def _component_atom(cms_model, full_system_index):
-    offset = 0
-    for component in cms_model.comp_ct:
-        upper = offset + component.atom_total
-        if offset < full_system_index <= upper:
-            return component.atom[full_system_index - offset]
-        offset = upper
+    from schrodinger.application.desmond.packages import topo
+
+    matches = [
+        component.atom[component_index]
+        for fsys_index, component_index, component, _ct_index
+        in topo.cms_atom_index(cms_model)
+        if fsys_index == full_system_index
+    ]
+    if len(matches) == 1:
+        return matches[0]
     raise PreparationError(
-        "cannot locate full-system atom {} in component CTs".format(
-            full_system_index
+        "full-system atom {} has {} component mappings".format(
+            full_system_index, len(matches)
         )
     )
 
 
-def _immutable_cms_signature(cms_model):
+def _ct_chemistry_signature(structure):
     atoms = tuple(
         (
             atom.element,
             int(atom.formal_charge),
             tuple(atom.xyz),
         )
-        for atom in cms_model.atom
+        for atom in structure.atom
     )
     bonds = tuple(sorted(
         (
@@ -366,15 +417,65 @@ def _immutable_cms_signature(cms_model):
             max(bond.atom1.index, bond.atom2.index),
             round(float(bond.order), 6),
         )
-        for bond in cms_model.fsys_ct.bond
+        for bond in structure.bond
     ))
-    return cms_model.atom_total, atoms, bonds
+    return structure.atom_total, atoms, bonds
+
+
+def _immutable_cms_signature(cms_model):
+    return (
+        _ct_chemistry_signature(cms_model.fsys_ct),
+        tuple(
+            _ct_chemistry_signature(component)
+            for component in cms_model.comp_ct
+        ),
+    )
+
+
+def _atom_metadata(atom):
+    return (
+        str(atom.chain),
+        int(atom.resnum),
+        str(atom.inscode),
+        str(atom.pdbres),
+    )
+
+
+def _non_target_metadata_signature(cms_model, target_atom_indices):
+    from schrodinger.application.desmond.packages import topo
+
+    target = set(target_atom_indices)
+    full_system = tuple(
+        (atom.index, _atom_metadata(atom))
+        for atom in cms_model.fsys_ct.atom
+        if atom.index not in target
+    )
+    components = tuple(
+        (
+            fsys_index,
+            ct_index,
+            component_index,
+            _atom_metadata(component.atom[component_index]),
+        )
+        for fsys_index, component_index, component, ct_index
+        in topo.cms_atom_index(cms_model)
+        if fsys_index not in target
+    )
+    return full_system, components
 
 
 def _write_analysis_cms(cms_model, groups, analysis_path):
     from schrodinger.application.desmond.packages import topo
 
     immutable_before = _immutable_cms_signature(cms_model)
+    target_atom_indices = {
+        atom_index
+        for group in groups
+        for atom_index in group["maestro_atom_indices"]
+    }
+    non_target_metadata_before = _non_target_metadata_signature(
+        cms_model, target_atom_indices
+    )
     chain = _choose_analysis_chain(cms_model)
     selectors = []
     for residue_number, group in enumerate(groups, start=1):
@@ -401,6 +502,12 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
     if _immutable_cms_signature(written) != immutable_before:
         raise PreparationError(
             "analysis CMS changed atoms, chemistry, bonds, or coordinates"
+        )
+    if _non_target_metadata_signature(
+        written, target_atom_indices
+    ) != non_target_metadata_before:
+        raise PreparationError(
+            "analysis CMS changed non-target residue metadata"
         )
 
     for group, selector in zip(groups, selectors):
@@ -435,15 +542,14 @@ def _write_analysis_cms(cms_model, groups, analysis_path):
     ])
 
 
-def _resolve_synergy_dir(synergy_dir):
-    value = synergy_dir or os.environ.get("SYNERGY_FRAGMENT_DIR")
-    if not value:
+def _resolve_synergy_dir(synergy_path):
+    if synergy_path is None:
         raise PreparationError(
             "single-UNK preparation requires --synergy-dir or "
             "SYNERGY_FRAGMENT_DIR"
         )
     try:
-        path = Path(value).expanduser().resolve(strict=True)
+        path = Path(synergy_path).resolve(strict=True)
     except OSError as exc:
         raise PreparationError("invalid read-only Synergy directory: {}".format(exc))
     if not path.is_dir():
@@ -451,36 +557,93 @@ def _resolve_synergy_dir(synergy_dir):
     return path
 
 
-def _resolve_adapter_python(adapter_python):
-    return (
-        adapter_python
-        or os.environ.get("SYNERGY_ADAPTER_PYTHON")
-        or "python3"
-    )
-
-
 def _plain_python_environment():
     """Remove Schrödinger interpreter injection from an adapter subprocess."""
     environment = dict(os.environ)
-    for key in (
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONNOUSERSITE",
-        "PYTHONSTARTUP",
-        "PYTHONEXECUTABLE",
-    ):
-        environment.pop(key, None)
     schrodinger_root = environment.get("SCHRODINGER")
-    if schrodinger_root and environment.get("LD_LIBRARY_PATH"):
-        root = os.path.realpath(schrodinger_root)
-        entries = environment["LD_LIBRARY_PATH"].split(os.pathsep)
-        environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+    if not schrodinger_root:
+        return environment
+    root = Path(schrodinger_root).expanduser().resolve()
+
+    def is_schrodinger_path(value):
+        if not value:
+            return False
+        try:
+            candidate = Path(value).expanduser().resolve()
+        except OSError:
+            return False
+        return candidate == root or root in candidate.parents
+
+    for key in ("PYTHONHOME", "PYTHONEXECUTABLE"):
+        if is_schrodinger_path(environment.get(key)):
+            environment.pop(key, None)
+    for key in ("PATH", "PYTHONPATH") + _LIBRARY_PATH_VARIABLES:
+        if key not in environment:
+            continue
+        environment[key] = os.pathsep.join(
             entry
-            for entry in entries
-            if entry
-            and not os.path.realpath(entry).startswith(root + os.sep)
+            for entry in environment[key].split(os.pathsep)
+            if not is_schrodinger_path(entry)
         )
     return environment
+
+
+def _resolve_adapter_python(adapter_python, environment):
+    requested = adapter_python or environment.get("SYNERGY_ADAPTER_PYTHON")
+    executable_name = requested or "python3"
+    candidate = shutil.which(
+        str(executable_name), path=environment.get("PATH", os.defpath)
+    )
+    if candidate is None:
+        raise PreparationError(
+            "cannot resolve ordinary adapter Python executable: {}".format(
+                executable_name
+            )
+        )
+    candidate_path = Path(candidate).resolve()
+    schrodinger_value = environment.get("SCHRODINGER")
+    schrodinger_root = (
+        Path(schrodinger_value).resolve() if schrodinger_value else None
+    )
+    if schrodinger_root is not None and (
+        candidate_path == schrodinger_root
+        or schrodinger_root in candidate_path.parents
+    ):
+        raise PreparationError(
+            "adapter Python must be outside SCHRODINGER: {}".format(
+                candidate_path
+            )
+        )
+
+    probe = subprocess.run(
+        [
+            str(candidate_path),
+            "-c",
+            "import os,sys; import rdkit; print(os.path.realpath(sys.executable))",
+        ],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise PreparationError(
+            "ordinary adapter Python cannot import RDKit: {}: {}".format(
+                candidate_path, probe.stderr.strip()
+            )
+        )
+    resolved_probe = Path(probe.stdout.strip().splitlines()[-1]).resolve()
+    if schrodinger_root is not None and (
+        resolved_probe == schrodinger_root
+        or schrodinger_root in resolved_probe.parents
+    ):
+        raise PreparationError(
+            "adapter Python probe resolved inside SCHRODINGER: {}".format(
+                resolved_probe
+            )
+        )
+    return resolved_probe
 
 
 def _run_synergy_adapter(
@@ -490,22 +653,27 @@ def _run_synergy_adapter(
         raise PreparationError("Lazy Synergy adapter does not exist: {}".format(
             ADAPTER_SCRIPT
         ))
+    child_environment = _plain_python_environment()
+    resolved_python = _resolve_adapter_python(
+        adapter_python, child_environment
+    )
+    resolved_synergy = _resolve_synergy_dir(synergy_dir)
     file_descriptor, temporary_name = tempfile.mkstemp(
         prefix=".synergy-map.", suffix=".json", dir=str(output_dir)
     )
     os.close(file_descriptor)
     temporary_path = Path(temporary_name)
     command = [
-        str(_resolve_adapter_python(adapter_python)),
+        str(resolved_python),
         str(ADAPTER_SCRIPT),
         "--sdf", str(sdf_path),
         "--output", str(temporary_path),
-        "--synergy-dir", str(_resolve_synergy_dir(synergy_dir)),
+        "--synergy-dir", str(resolved_synergy),
     ]
     try:
         completed = subprocess.run(
             command,
-            env=_plain_python_environment(),
+            env=child_environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -533,21 +701,144 @@ def _run_synergy_adapter(
 
 
 def _validate_adapter_payload(payload, heavy_atom_count):
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         raise PreparationError("Lazy Synergy adapter output is not a JSON object")
-    if payload.get("schema_version") != 1 or payload.get("status") != "ok":
+    if (
+        isinstance(payload.get("schema_version"), bool)
+        or payload.get("schema_version") != 1
+        or payload.get("status") != "ok"
+    ):
         raise PreparationError("Lazy Synergy adapter did not return schema-v1 ok")
-    if payload.get("source_atom_count") != heavy_atom_count:
+    source_atom_count = payload.get("source_atom_count")
+    if (
+        isinstance(source_atom_count, bool)
+        or not isinstance(source_atom_count, int)
+        or source_atom_count != heavy_atom_count
+    ):
         raise PreparationError(
             "Lazy Synergy adapter atom count does not match exported heavy atoms"
         )
-    if payload.get("unassigned_atom_indices") or payload.get(
+    for field in ("unassigned_atom_indices", "duplicate_atom_indices"):
+        if not isinstance(payload.get(field), list):
+            raise PreparationError(
+                "Lazy Synergy adapter field {} must be a list".format(field)
+            )
+    if payload["unassigned_atom_indices"] or payload[
         "duplicate_atom_indices"
-    ):
+    ]:
         raise PreparationError("Lazy Synergy adapter returned an invalid partition")
     groups = payload.get("groups")
     if not isinstance(groups, list) or not groups:
         raise PreparationError("Lazy Synergy adapter returned no groups")
+    if not isinstance(payload.get("warnings"), list):
+        raise PreparationError("Lazy Synergy adapter warnings must be a list")
+    topology = payload.get("topology")
+    if topology is not None and not isinstance(topology, Mapping):
+        raise PreparationError("Lazy Synergy adapter topology must be a mapping")
+    mapper_version = payload.get("mapper_version")
+    if not isinstance(mapper_version, str) or not mapper_version:
+        raise PreparationError(
+            "Lazy Synergy adapter mapper_version must be a non-empty string"
+        )
+
+    seen_group_ids = set()
+    assigned_indices = []
+    required_group_fields = {
+        "group_id",
+        "group_type",
+        "rdkit_atom_indices",
+        "sequence_index",
+        "display_name",
+        "canonical_resname",
+        "recognition_status",
+        "residue_smiles",
+        "connected_group_ids",
+    }
+    for position, group in enumerate(groups):
+        if not isinstance(group, Mapping):
+            raise PreparationError(
+                "adapter group {} must be a mapping".format(position)
+            )
+        missing = sorted(required_group_fields - set(group))
+        if missing:
+            raise PreparationError(
+                "adapter group {} missing required fields {}".format(
+                    position, missing
+                )
+            )
+        group_id = group.get("group_id")
+        if not isinstance(group_id, str) or not group_id:
+            raise PreparationError(
+                "adapter group {} has an invalid group_id".format(position)
+            )
+        if group_id in seen_group_ids:
+            raise PreparationError(
+                "adapter groups contain duplicate group_id {}".format(group_id)
+            )
+        seen_group_ids.add(group_id)
+        if group.get("group_type") not in {
+            "residue", "n_cap", "c_cap", "crosslink"
+        }:
+            raise PreparationError(
+                "adapter group {} has an invalid group_type".format(position)
+            )
+        sequence_index = group.get("sequence_index")
+        if (
+            sequence_index is not None
+            and (
+                isinstance(sequence_index, bool)
+                or not isinstance(sequence_index, int)
+                or sequence_index < 0
+            )
+        ):
+            raise PreparationError(
+                "adapter group {} has an invalid sequence_index".format(position)
+            )
+        for field in ("display_name", "recognition_status", "residue_smiles"):
+            if not isinstance(group.get(field), str):
+                raise PreparationError(
+                    "adapter group {} field {} must be a string".format(
+                        position, field
+                    )
+                )
+        canonical = group.get("canonical_resname")
+        if canonical is not None and not isinstance(canonical, str):
+            raise PreparationError(
+                "adapter group {} canonical_resname must be null or a string"
+                .format(position)
+            )
+        connections = group.get("connected_group_ids")
+        if not isinstance(connections, list) or any(
+            not isinstance(connection, str) for connection in connections
+        ):
+            raise PreparationError(
+                "adapter group {} connected_group_ids must be a string list"
+                .format(position)
+            )
+        atom_indices = group.get("rdkit_atom_indices")
+        if not isinstance(atom_indices, list) or not atom_indices:
+            raise PreparationError(
+                "adapter group {} rdkit_atom_indices must be a non-empty list"
+                .format(position)
+            )
+        invalid = [
+            atom_index
+            for atom_index in atom_indices
+            if isinstance(atom_index, bool)
+            or not isinstance(atom_index, int)
+            or not 0 <= atom_index < heavy_atom_count
+        ]
+        if invalid:
+            raise PreparationError(
+                "adapter group {} has invalid RDKit atom indices {}".format(
+                    position, invalid
+                )
+            )
+        assigned_indices.extend(atom_indices)
+    if sorted(assigned_indices) != list(range(heavy_atom_count)):
+        raise PreparationError(
+            "Lazy Synergy adapter groups are not an exact heavy-atom partition"
+        )
     return groups
 
 
@@ -566,6 +857,30 @@ def _write_log(log_path, message):
         handle.write(str(message).rstrip() + "\n")
 
 
+def _mark_manifest_failed_if_running(
+    manifest_path, stage, return_code, log_path, mode
+):
+    manifest = load_json(manifest_path)
+    if not isinstance(manifest, Mapping):
+        raise PreparationError("manifest must contain a JSON object")
+    status = manifest.get("status")
+    if status in ("success", "failed"):
+        return status
+    if status != "running":
+        raise PreparationError(
+            "cannot fail manifest from unexpected status {!r}".format(status)
+        )
+    update_manifest(
+        manifest_path,
+        "failed",
+        stage=stage,
+        return_code=return_code,
+        log=str(log_path),
+        mode=mode,
+    )
+    return "failed"
+
+
 def prepare_ligand_decomp(
     cms_path,
     ligand_asl,
@@ -578,6 +893,8 @@ def prepare_ligand_decomp(
 
     source_path = Path(cms_path).expanduser().resolve(strict=True)
     output_path = Path(output_dir).expanduser().resolve()
+    synergy_path = _candidate_synergy_path(synergy_dir)
+    _validate_path_domains(source_path, output_path, synergy_path)
     output_path.mkdir(parents=True, exist_ok=True)
     manifest_path = output_path / "decomp_manifest.json"
     log_path = output_path / "prepare_ligand_decomp.log"
@@ -641,7 +958,7 @@ def prepare_ligand_decomp(
             adapter_payload = _run_synergy_adapter(
                 ligand_graph_path,
                 output_path,
-                synergy_dir,
+                synergy_path,
                 adapter_python,
                 log_path,
             )
@@ -746,27 +1063,40 @@ def prepare_ligand_decomp(
             versions={"synergy_mapper": residue_map["mapper_version"]},
         )
         return result
-    except (ContractError, OSError, ValueError, TypeError, PreparationError) as exc:
+    except Exception as exc:
         message = str(exc)
         try:
             _write_log(log_path, "{}: {}".format(stage, message))
         except OSError:
             pass
+        transition_issue = None
         if manifest_created:
             try:
-                update_manifest(
+                _mark_manifest_failed_if_running(
                     manifest_path,
-                    "failed",
-                    stage=stage,
-                    return_code=2,
-                    log=str(log_path),
-                    mode=locals().get("mode"),
+                    stage,
+                    2,
+                    log_path,
+                    locals().get("mode"),
                 )
-            except (ContractError, OSError, ValueError):
-                pass
-        if isinstance(exc, PreparationError):
+            except Exception as failure_exc:
+                transition_issue = str(failure_exc)
+                try:
+                    _write_log(
+                        log_path,
+                        "manifest failure transition issue: {}".format(
+                            transition_issue
+                        ),
+                    )
+                except OSError:
+                    pass
+        if isinstance(exc, PreparationError) and transition_issue is None:
             raise
-        raise PreparationError(message)
+        if transition_issue is not None:
+            message = "{}; manifest failure transition issue: {}".format(
+                message, transition_issue
+            )
+        raise PreparationError(message) from exc
 
 
 def _build_parser():
