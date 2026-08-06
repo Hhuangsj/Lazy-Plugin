@@ -176,6 +176,45 @@ def test_atomic_json_write_serialization_failure_preserves_destination(tmp_path)
     assert list(output.parent.glob(".*.tmp")) == []
 
 
+def test_atomic_json_write_handle_write_failure_preserves_destination(
+    tmp_path, monkeypatch
+):
+    contract = _module()
+    output = tmp_path / "manifest.json"
+    output.write_text("original\n", encoding="utf-8")
+    original_fdopen = contract.os.fdopen
+
+    class FailingHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._handle.__exit__(*exc_info)
+
+        def write(self, content):
+            raise OSError("injected handle.write failure")
+
+        def flush(self):
+            return self._handle.flush()
+
+        def fileno(self):
+            return self._handle.fileno()
+
+    def fail_write(file_descriptor, *args, **kwargs):
+        return FailingHandle(original_fdopen(file_descriptor, *args, **kwargs))
+
+    monkeypatch.setattr(contract.os, "fdopen", fail_write)
+    with pytest.raises(contract.ContractError):
+        contract.atomic_write_json(output, {"new": True})
+
+    assert output.read_text(encoding="utf-8") == "original\n"
+    assert list(output.parent.glob(".*.tmp")) == []
+
+
 def test_atomic_json_write_replace_failure_preserves_destination(tmp_path, monkeypatch):
     contract = _module()
     output = tmp_path / "manifest.json"
