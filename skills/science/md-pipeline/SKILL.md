@@ -96,7 +96,8 @@ MM/GBSA（含 `DECOMP=1`）读取同一对 `*_ALIGN-out.cms` + `*_ALIGN_trj`；A
 raw 模式也要求唯一完整的 `*-out.cms` + `*_trj` pair；多个 raw 产物并存时用
 `RAW_CMS=/path/to/target-out.cms` 消除歧义。`RAW_TRJ` 可供 event_analysis/PLIP 使用，
 但不适用于 thermal MM/GBSA；MM/GBSA 检测到相应 `*_TRJ` 覆盖变量时会返回 2，避免
-静默忽略。选择失败发生在分析输出删除之前，不会静默取第一个 CMS。
+静默忽略。CMS/TRJ 覆盖值若为相对路径，始终相对于当前目标 MD 目录解析；绝对路径
+保持不变。选择失败发生在分析输出删除之前，不会静默取第一个 CMS。
 
 ## 分析前必做:查清配体到底是什么
 

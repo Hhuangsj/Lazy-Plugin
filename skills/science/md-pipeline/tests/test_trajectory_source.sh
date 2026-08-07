@@ -51,6 +51,38 @@ else
     fail "raw selection should ignore a custom Align pair"
 fi
 
+STALE_DIR="$TMP_DIR/raw-with-stale-cms"
+mkdir -p "$STALE_DIR/system_trj"
+touch "$STALE_DIR/system-out.cms" "$STALE_DIR/stale-out.cms"
+if select_trajectory_pair "$STALE_DIR" raw; then
+    assert_pair "raw selection ignores CMS without matching trajectory" \
+        "$STALE_DIR/system-out.cms" "$STALE_DIR/system_trj"
+else
+    fail "raw selection should ignore a CMS without matching trajectory"
+fi
+
+TARGET_DIR="$TMP_DIR/relative-target"
+CALLER_DIR="$TMP_DIR/relative-caller"
+mkdir -p "$TARGET_DIR/system_trj" "$TARGET_DIR/custom_ALIGN_trj" \
+    "$CALLER_DIR/system_trj" "$CALLER_DIR/custom_ALIGN_trj"
+touch "$TARGET_DIR/system-out.cms" "$TARGET_DIR/custom_ALIGN-out.cms" \
+    "$CALLER_DIR/system-out.cms" "$CALLER_DIR/custom_ALIGN-out.cms"
+ORIGINAL_PWD=$PWD
+cd "$CALLER_DIR" || exit 1
+if select_trajectory_pair ../relative-target raw "" "" system-out.cms; then
+    assert_pair "relative raw override resolves inside target directory" \
+        "$TARGET_DIR/system-out.cms" "$TARGET_DIR/system_trj"
+else
+    fail "relative raw override should resolve inside target directory"
+fi
+if select_trajectory_pair ../relative-target align custom_ALIGN-out.cms; then
+    assert_pair "relative Align override resolves inside target directory" \
+        "$TARGET_DIR/custom_ALIGN-out.cms" "$TARGET_DIR/custom_ALIGN_trj"
+else
+    fail "relative Align override should resolve inside target directory"
+fi
+cd "$ORIGINAL_PWD" || exit 1
+
 touch "$TMP_DIR/second-out.cms"
 mkdir -p "$TMP_DIR/second_trj"
 if select_trajectory_pair "$TMP_DIR" raw >/dev/null 2>&1; then

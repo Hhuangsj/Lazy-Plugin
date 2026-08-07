@@ -19,14 +19,17 @@ select_trajectory_pair() {
         echo "ERROR: trajectory directory does not exist: ${dir:-<empty>}" >&2
         return 1
     fi
+    dir="$(cd "$dir" 2>/dev/null && pwd)" || {
+        echo "ERROR: trajectory directory is not accessible: $dir" >&2
+        return 1
+    }
 
     resolve_inside_dir() {
         local path="$1"
-        if [ -n "$path" ] && [ ! -e "$path" ] && [ -e "$dir/$path" ]; then
-            printf '%s\n' "$dir/$path"
-        else
-            printf '%s\n' "$path"
-        fi
+        case "$path" in
+            /*) printf '%s\n' "$path" ;;
+            *) printf '%s\n' "$dir/$path" ;;
+        esac
     }
 
     case "$source" in
@@ -45,12 +48,13 @@ select_trajectory_pair() {
                     [[ "$candidate_base" == *_ALIGN-out.cms ]] && continue
                     [[ "$candidate_base" == PL_Analysis* ]] && continue
                     [[ "$candidate_base" =~ _[0-9]+-out\.cms$ ]] && continue
-                    candidates+=("$candidate")
+                    candidate_base="${candidate%-out.cms}"
+                    [ -d "${candidate_base}_trj" ] && candidates+=("$candidate")
                 done
                 eval "$old_nullglob"
 
                 if [ "${#candidates[@]}" -eq 0 ]; then
-                    echo "ERROR: no raw *-out.cms found in $dir" >&2
+                    echo "ERROR: no complete raw *-out.cms + *_trj pair found in $dir" >&2
                     return 1
                 fi
                 if [ "${#candidates[@]}" -gt 1 ]; then

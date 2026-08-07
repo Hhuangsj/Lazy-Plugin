@@ -16,12 +16,13 @@ select_trajectory_pair DIR SOURCE ALIGN_CMS ALIGN_TRJ RAW_CMS RAW_TRJ
 
 The positional raw arguments default to environment variables `RAW_CMS` and `RAW_TRJ`. For `SOURCE=raw`:
 
-- Without `RAW_CMS`, require exactly one eligible raw `*-out.cms`.
+- Without `RAW_CMS`, require exactly one eligible complete raw `*-out.cms` + `*_trj` pair; ignore stale CMS files without a matching trajectory.
 - With `RAW_CMS`, resolve the explicit file directly, even when automatic discovery is ambiguous.
 - Without `RAW_TRJ`, derive `<selected-base>_trj` beside the selected CMS.
 - With `RAW_TRJ`, resolve and validate the explicit trajectory directory.
 
 Existing Align behavior and `ALIGN_CMS`/`ALIGN_TRJ` compatibility remain unchanged. All selected CMS files and trajectory directories must exist. Unknown sources still fail.
+Relative CMS/trajectory overrides are always resolved against the target MD directory, independent of the caller's current directory; absolute overrides remain absolute.
 
 ## MMGBSA integration
 
@@ -41,4 +42,4 @@ Normal thermal MM/GBSA receives the selected CMS. DECOMP receives both the selec
 
 ## Tests and documentation
 
-Behavior tests prove automatic raw ambiguity fails before output deletion, `RAW_CMS` resolves it, Align selection reaches thermal MM/GBSA without overwriting raw output, and raw DECOMP succeeds when an Align pair coexists. Selector tests cover explicit raw CMS derivation, explicit raw trajectory override, and missing explicit inputs. The skill documentation describes the same variables for event analysis, PLIP, MM/GBSA, and DECOMP.
+Behavior tests prove automatic raw ambiguity fails before output deletion, stale CMS files are ignored, `RAW_CMS` resolves ambiguity relative to the target MD directory, Align selection reaches thermal MM/GBSA without overwriting raw output, and raw/Align DECOMP each use the selected pair. Selector tests cover explicit raw CMS derivation, explicit raw trajectory override, and missing explicit inputs. The skill documentation describes the same variables for event analysis, PLIP, MM/GBSA, and DECOMP.

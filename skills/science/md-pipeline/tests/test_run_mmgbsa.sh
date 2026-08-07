@@ -681,6 +681,29 @@ test_decomp_uses_selected_raw_trajectory_when_align_pair_coexists() {
     assert_argv_option 6 --trajectory "$directory/complex_trj"
 }
 
+test_align_decomp_uses_align_pair_and_preserves_raw_output() {
+    install_fake_environment
+    local directory raw_output align_output decomp_dir
+    directory=$(make_md_directory)
+    : > "$directory/PL_Analysis_ALIGN-out.cms"
+    mkdir "$directory/PL_Analysis_ALIGN_trj"
+    raw_output="$directory/mmgbsa_last100ns"
+    align_output="$directory/mmgbsa_last100ns_align"
+    decomp_dir="$align_output/residue_decomp"
+    mkdir -p "$raw_output"
+    printf 'keep\n' > "$raw_output/sentinel"
+
+    assert_status 0 run_mmgbsa "$directory" env TRAJECTORY_SOURCE=align DECOMP=1
+
+    assert_call_kinds prepare json json json thermal aggregation
+    assert_argv 1 python3 "$SCRIPTS_DIR/prepare_ligand_decomp.py" \
+        "$directory/PL_Analysis_ALIGN-out.cms" \
+        --lig-asl 'res.ptype UNK' --out-dir "$decomp_dir"
+    assert_argv_option 6 --trajectory "$directory/PL_Analysis_ALIGN_trj"
+    [ -f "$raw_output/sentinel" ] || fail "Align DECOMP removed raw MMGBSA output"
+    [ -d "$align_output" ] || fail "Align DECOMP output directory was not created"
+}
+
 test_decomp_rejects_missing_main_trajectory() {
     install_fake_environment
     local directory output manifest
