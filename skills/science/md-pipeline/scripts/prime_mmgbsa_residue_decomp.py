@@ -632,7 +632,7 @@ def _build_parser():
     parser.add_argument("--frame-csv", required=True)
     parser.add_argument("--summary-csv", required=True)
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--properties", nargs="+")
+    parser.add_argument("--properties", nargs="*")
     return parser
 
 

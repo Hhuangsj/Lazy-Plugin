@@ -682,6 +682,34 @@ def test_cli_invalid_property_list_fails_existing_running_manifest(
     assert load_json(paths["manifest"])["status"] == "failed"
 
 
+def test_cli_bare_properties_fails_manifest_before_schrodinger_io(
+    tmp_path, monkeypatch
+):
+    paths = _inputs(tmp_path)
+    monkeypatch.setattr(
+        aggregation_module,
+        "_schrodinger_dependencies",
+        lambda: (_ for _ in ()).throw(AssertionError("Schrodinger I/O reached")),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        aggregation_module.main([
+            "--prime-maegz", str(paths["prime"]),
+            "--residue-map", str(paths["residue_map"]),
+            "--trajectory", str(paths["trajectory"]),
+            "--start", "0",
+            "--end", "0",
+            "--step", "1",
+            "--frame-csv", str(paths["frame_csv"]),
+            "--summary-csv", str(paths["summary_csv"]),
+            "--manifest", str(paths["manifest"]),
+            "--properties",
+        ])
+
+    assert exit_info.value.code == 2
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
 def test_manifest_failure_transition_error_preserves_original_error(tmp_path, monkeypatch):
     paths = _inputs(tmp_path)
     property_name = DEFAULT_PROPERTIES["dG_Bind"]
