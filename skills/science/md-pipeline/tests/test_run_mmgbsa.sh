@@ -26,7 +26,12 @@ EOF
     chmod +x "$SANDBOX/fake-toolenv"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/bin/AutoMD"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/bin/AutoTRJ"
-    chmod +x "$SANDBOX/bin/AutoMD" "$SANDBOX/bin/AutoTRJ"
+    cat > "$SANDBOX/bin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [ "${FAIL_LINK:-0}" = 1 ]; then exit 73; fi
+exec /bin/ln "$@"
+EOF
+    chmod +x "$SANDBOX/bin/AutoMD" "$SANDBOX/bin/AutoTRJ" "$SANDBOX/bin/ln"
     cat > "$SANDBOX/fake-schrodinger/run" <<'EOF'
 #!/usr/bin/env bash
 set -u
@@ -92,6 +97,11 @@ case "$script_name" in
                 printf '{"analysis_cms": "%s/analysis cms.cms", "analysis_ligand_asl": "chain.name L and res.ptype UNK", "residue_map": "%s/residue map.json"}\n' "$out_dir" "$out_dir" > "$out_dir/prepare_result.json"
                 : > "$out_dir/analysis cms.cms"
                 : > "$out_dir/residue map.json"
+                if [ -n "${PREPARE_TRAJECTORY_TARGET:-}" ]; then
+                    /bin/ln -s "$PREPARE_TRAJECTORY_TARGET" "$out_dir/complex_trj"
+                elif [ -n "${PREPARE_TRAJECTORY_CONFLICT:-}" ]; then
+                    printf '%s\n' "$PREPARE_TRAJECTORY_CONFLICT" > "$out_dir/complex_trj"
+                fi
                 ;;
         esac
         exit 0
@@ -275,6 +285,44 @@ test_default_unset_and_zero_keep_one_exact_thermal_invocation() {
     assert_default_thermal "$directory" 0
 }
 
+test_default_path_preserves_non_arithmetic_frame_arguments() {
+    install_fake_environment
+    local directory
+    directory=$(make_md_directory)
+
+    assert_status 0 run_mmgbsa "$directory" env START=001 END=08 STEP=03 NJOBS=04
+
+    assert_call_kinds thermal
+    assert_argv 1 thermal_mmgbsa.py "$directory/complex-out.cms" \
+        -lig_asl 'res.ptype UNK' -j complex \
+        -start_frame 001 -end_frame 08 -step_size 03 -NJOBS 04 -HOST localhost:04
+}
+
+test_decomp_rejects_invalid_frame_ranges_before_external_calls() {
+    install_fake_environment
+    local directory
+    directory=$(make_md_directory)
+
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 START=1x END=22 STEP=3
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "START/END/STEP"
+
+    reset_call_capture
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 START=1:2 END=22 STEP=3
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "START/END/STEP"
+
+    reset_call_capture
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 START=23 END=22 STEP=3
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "START"
+
+    reset_call_capture
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 START=11 END=22 STEP=0
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "STEP"
+}
+
 test_decomp_uses_exact_argv_and_lossless_call_order() {
     install_fake_environment
     local directory decomp_dir
@@ -337,6 +385,55 @@ test_decomp_links_source_trajectory_beside_analysis_cms() {
 
     [ -L "$linked_trajectory" ] || fail "analysis trajectory link is missing"
     assert_eq "$(readlink "$linked_trajectory")" "$directory/complex_trj"
+}
+
+test_decomp_accepts_existing_link_to_symlinked_source_trajectory() {
+    install_fake_environment
+    local directory decomp_dir linked_trajectory trajectory_store
+    directory=$(make_md_directory)
+    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
+    linked_trajectory="$decomp_dir/complex_trj"
+    trajectory_store="$SANDBOX/trajectory-store"
+    mkdir "$trajectory_store"
+    rmdir "$directory/complex_trj"
+    /bin/ln -s "$trajectory_store" "$directory/complex_trj"
+
+    assert_status 0 run_mmgbsa "$directory" env DECOMP=1 \
+        PREPARE_TRAJECTORY_TARGET="$directory/complex_trj"
+
+    [ -L "$linked_trajectory" ] || fail "existing analysis trajectory link was removed"
+    assert_eq "$(readlink -f "$linked_trajectory")" "$trajectory_store"
+    assert_call_kinds prepare json json json thermal aggregation
+}
+
+test_decomp_rejects_existing_trajectory_conflict_without_overwrite() {
+    install_fake_environment
+    local directory decomp_dir conflicting_trajectory
+    directory=$(make_md_directory)
+    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
+    conflicting_trajectory="$decomp_dir/complex_trj"
+
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 \
+        PREPARE_TRAJECTORY_CONFLICT=keep-me
+
+    assert_eq "$(cat "$conflicting_trajectory")" keep-me
+    assert_call_kinds prepare json json json manifest
+    assert_manifest_failure "$directory" trajectory_link 2 "$decomp_dir/prepare_ligand_decomp.log"
+}
+
+test_decomp_marks_manifest_when_trajectory_link_creation_fails() {
+    install_fake_environment
+    local directory decomp_dir linked_trajectory
+    directory=$(make_md_directory)
+    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
+    linked_trajectory="$decomp_dir/complex_trj"
+
+    assert_status 2 run_mmgbsa "$directory" env DECOMP=1 FAIL_LINK=1
+
+    [ ! -e "$linked_trajectory" ] && [ ! -L "$linked_trajectory" ] || \
+        fail "failed trajectory link must not be published"
+    assert_call_kinds prepare json json json manifest
+    assert_manifest_failure "$directory" trajectory_link 2 "$decomp_dir/prepare_ligand_decomp.log"
 }
 
 assert_prepare_result_failure() {

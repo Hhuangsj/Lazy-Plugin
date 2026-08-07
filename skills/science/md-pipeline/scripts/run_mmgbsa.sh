@@ -28,7 +28,7 @@ LIG_ASL="${LIG_ASL:-res.ptype UNK}"
 START="${START:-1000}"     # 起始帧(0-based);后 100ns 起点
 END="${END:-2000}"         # 结束帧
 STEP="${STEP:-20}"         # 每 N 帧抽一帧
-DECOMP_THERMAL_END=$((END + 1))  # decomp 聚合契约把 END 视为包含端点
+DECOMP_THERMAL_END=""
 # NJOBS = 把帧切成几个 Prime 子作业,且下面 -HOST 用 localhost:$NJOBS 让它们并发。
 # => NJOBS=8 时 8 个子作业同时跑 = 8 核。真正决定并发的是 -HOST 的 ":N",不是 hosts
 #    的 processors(见 README 踩坑记录 7)。要几核就把 NJOBS 设几。
@@ -40,6 +40,40 @@ SYNERGY_FRAGMENT_DIR="${SYNERGY_FRAGMENT_DIR:-}"
 SYNERGY_ADAPTER_PYTHON="${SYNERGY_ADAPTER_PYTHON:-}"
 
 [ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
+
+normalize_decimal() {
+    DECIMAL_VALUE=$1
+    while [ "${#DECIMAL_VALUE}" -gt 1 ] && [ "${DECIMAL_VALUE#0}" != "$DECIMAL_VALUE" ]; do
+        DECIMAL_VALUE=${DECIMAL_VALUE#0}
+    done
+}
+
+validate_decomp_frames() {
+    local start_number end_number step_number
+    case "$START" in ''|*[!0-9]*) echo "ERROR: DECOMP=1 时 START/END/STEP 必须是十进制非负整数。" >&2; return 2 ;; esac
+    case "$END" in ''|*[!0-9]*) echo "ERROR: DECOMP=1 时 START/END/STEP 必须是十进制非负整数。" >&2; return 2 ;; esac
+    case "$STEP" in ''|*[!0-9]*) echo "ERROR: DECOMP=1 时 START/END/STEP 必须是十进制非负整数。" >&2; return 2 ;; esac
+    normalize_decimal "$START"; start_number=$DECIMAL_VALUE
+    normalize_decimal "$END"; end_number=$DECIMAL_VALUE
+    normalize_decimal "$STEP"; step_number=$DECIMAL_VALUE
+    if [ "${#start_number}" -gt 18 ] || [ "${#end_number}" -gt 18 ] || [ "${#step_number}" -gt 18 ]; then
+        echo "ERROR: DECOMP=1 时 START/END/STEP 超出支持范围。" >&2
+        return 2
+    fi
+    if ((10#$step_number == 0)); then
+        echo "ERROR: DECOMP=1 时 STEP 必须大于 0。" >&2
+        return 2
+    fi
+    if ((10#$start_number > 10#$end_number)); then
+        echo "ERROR: DECOMP=1 时 START 不能大于 END。" >&2
+        return 2
+    fi
+    DECOMP_THERMAL_END=$((10#$end_number + 1))
+}
+
+if [ "$DECOMP" = 1 ]; then
+    validate_decomp_frames || exit $?
+fi
 
 mark_decomp_failed() {
     local manifest=$1 stage=$2 rc=$3 log=$4
@@ -71,7 +105,8 @@ run_decomp() {
     local thermal_log="$decomp_dir/thermal_mmgbsa.log"
     local aggregate_log="$decomp_dir/prime_mmgbsa_residue_decomp.log"
     local prepare_result="$decomp_dir/prepare_result.json"
-    local analysis_cms analysis_ligand_asl residue_map trj analysis_trajectory prime_maegz rc
+    local analysis_cms analysis_ligand_asl residue_map trj trj_real
+    local analysis_trajectory analysis_trajectory_real prime_maegz rc
     local -a prepare_args aggregate_args trajectories prime_outputs
 
     mkdir -p "$decomp_dir"
@@ -116,11 +151,18 @@ run_decomp() {
         return 2
     fi
     trj=${trajectories[0]}
+    trj_real="$(readlink -f -- "$trj" 2>/dev/null)"
+    if [ -z "$trj_real" ]; then
+        echo "ERROR: 无法解析源轨迹: $trj" >> "$prepare_log"
+        mark_decomp_failed "$manifest" trajectory_link 2 "$prepare_log"
+        return 2
+    fi
 
     analysis_trajectory="$(dirname "$analysis_cms")/$(basename "$trj")"
     if [ "$analysis_trajectory" != "$trj" ]; then
         if [ -e "$analysis_trajectory" ] || [ -L "$analysis_trajectory" ]; then
-            if [ "$(readlink -f "$analysis_trajectory" 2>/dev/null)" != "$trj" ]; then
+            analysis_trajectory_real="$(readlink -f -- "$analysis_trajectory" 2>/dev/null)"
+            if [ -z "$analysis_trajectory_real" ] || [ "$analysis_trajectory_real" != "$trj_real" ]; then
                 echo "ERROR: analysis CMS 旁已有冲突轨迹: $analysis_trajectory" >> "$prepare_log"
                 mark_decomp_failed "$manifest" trajectory_link 2 "$prepare_log"
                 return 2

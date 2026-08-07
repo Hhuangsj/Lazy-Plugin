@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -246,6 +247,72 @@ def test_crosslink_component_is_its_own_group(tmp_path):
     assert sulfur_indices.isdisjoint(groups["P001"]["rdkit_atom_indices"])
     assert set(xlink["connected_group_ids"]) == {"P000", "P001"}
     assert any("XLINK_000" in warning and "crosslinked" in warning for warning in payload["warnings"])
+
+
+SIDECHAIN_LACTAM = "N[C@@H]1CCCCNC(=O)CC[C@H](C(O)=O)NC1=O"
+
+
+def test_non_disulfide_crosslink_build_mapping_is_strict_and_complete(tmp_path):
+    """Losing topology, bridge ownership, connectivity, or full partition must fail."""
+    source_mol, payload, _ = _map_peptide(tmp_path, SIDECHAIN_LACTAM)
+    groups = _groups_by_id(payload)
+    residues = [groups["P000"], groups["P001"]]
+    xlink = groups["XLINK_000"]
+    assigned = [
+        atom_index
+        for group in payload["groups"]
+        for atom_index in group["rdkit_atom_indices"]
+    ]
+
+    assert payload["topology"] == {
+        "head_to_tail": False,
+        "disulfide": False,
+        "sidechain_bridge": True,
+        "is_cyclic": True,
+    }
+    assert [group["recognition_status"] for group in residues] == [
+        "crosslinked",
+        "crosslinked",
+    ]
+    assert xlink["group_type"] == "crosslink"
+    assert xlink["display_name"] == "crosslink"
+    assert xlink["recognition_status"] == "crosslinked"
+    assert xlink["rdkit_atom_indices"]
+    assert not any(
+        source_mol.GetAtomWithIdx(index).GetSymbol() == "S"
+        for index in xlink["rdkit_atom_indices"]
+    )
+    assert set(xlink["rdkit_atom_indices"]).isdisjoint(residues[0]["rdkit_atom_indices"])
+    assert set(xlink["rdkit_atom_indices"]).isdisjoint(residues[1]["rdkit_atom_indices"])
+    assert set(xlink["connected_group_ids"]) == {"P000", "P001"}
+    assert set(residues[0]["connected_group_ids"]) == {"P001", "XLINK_000"}
+    assert set(residues[1]["connected_group_ids"]) == {"P000", "XLINK_000"}
+    assert sorted(assigned) == list(range(source_mol.GetNumAtoms()))
+    assert len(assigned) == len(set(assigned)) == source_mol.GetNumAtoms()
+    assert payload["unassigned_atom_indices"] == []
+    assert payload["duplicate_atom_indices"] == []
+
+
+def test_non_disulfide_crosslink_build_mapping_rejects_status_drift(monkeypatch):
+    """Dropping the full-pipeline crosslinked status check must fail."""
+    adapter = _adapter_module()
+    loaded = adapter._load_synergy(SYNERGY_DIR)
+    real_sequence_peptide = loaded[5]
+
+    def sequence_with_status_drift(smiles, identifier):
+        sequence = real_sequence_peptide(smiles, identifier)
+        residues = list(sequence.residues)
+        residues[0] = replace(residues[0], status="unknown")
+        return replace(sequence, residues=tuple(residues))
+
+    monkeypatch.setattr(
+        adapter,
+        "_load_synergy",
+        lambda synergy_dir: loaded[:5] + (sequence_with_status_drift,) + loaded[6:],
+    )
+
+    with pytest.raises(adapter.AdapterError, match="recognition"):
+        adapter.build_mapping(Chem.MolFromSmiles(SIDECHAIN_LACTAM), SYNERGY_DIR)
 
 
 def _roundtrip_recognition_inputs(roundtrip_fragments):
