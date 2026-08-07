@@ -23,6 +23,18 @@ test_load_manifest_sets_fields() {
     assert_contains "$TOOL_DESC" "假工具"
 }
 
+test_load_manifest_clears_optional_validator_hook() {
+    local fixture_tools="$TOOLENV_TOOLS_DIR"
+    export TOOLENV_TOOLS_DIR="$TOOLENV_HOME/tools.d"
+    toolenv_load_manifest synergy-fragment
+    declare -F tool_validate_path >/dev/null || fail "Synergy manifest 缺 tool_validate_path"
+    export TOOLENV_TOOLS_DIR="$fixture_tools"
+    toolenv_load_manifest faketool
+    if declare -F tool_validate_path >/dev/null; then
+        fail "加载无 hook 的 manifest 后仍残留 tool_validate_path"
+    fi
+}
+
 test_load_unknown_manifest_fails() {
     assert_fail toolenv_load_manifest nosuchtool
 }
@@ -56,6 +68,48 @@ test_override_var_beats_detect() {
     assert_eq "$TOOLENV_HIT" "$SANDBOX/override"
     assert_eq "$TOOLENV_HIT_SOURCE" "override"
     unset FAKETOOL_HOME TOOLENV_FAKETOOL
+}
+
+_real_toolenv_which() {
+    REAL_WHICH_RUN=$((REAL_WHICH_RUN + 1))
+    TOOLENV_TOOLS_DIR="$TOOLENV_HOME/tools.d" \
+    TOOLENV_CACHE_DIR="$SANDBOX/real-cache-$REAL_WHICH_RUN" \
+    TOOLENV_CONFIG_DIR="$SANDBOX/real-config" \
+    "$TOOLENV_HOME/toolenv" which synergy-fragment
+}
+
+test_synergy_override_validation_and_precedence() {
+    local incomplete="$SANDBOX/incomplete" complete="$SANDBOX/complete" env_dir="$SANDBOX/env"
+    local fixture_tools="$TOOLENV_TOOLS_DIR"
+    REAL_WHICH_RUN=0
+    export TOOLENV_TOOLS_DIR="$TOOLENV_HOME/tools.d"
+    mkdir -p "$incomplete" "$complete" "$env_dir"
+    : > "$complete/peptide_sequence.py"
+    : > "$complete/monomer_library_nonstandard_segments_simple.csv"
+    : > "$env_dir/peptide_sequence.py"
+    : > "$env_dir/monomer_library_nonstandard_segments_simple.csv"
+
+    export TOOLENV_SYNERGY_FRAGMENT="$incomplete"
+    export SYNERGY_FRAGMENT_DIR="$env_dir"
+    _reset
+    assert_fail toolenv_resolve synergy-fragment
+    assert_eq "$TOOLENV_HIT" ""
+    assert_fail _real_toolenv_which
+
+    export TOOLENV_SYNERGY_FRAGMENT="$complete"
+    _reset
+    assert_ok toolenv_resolve synergy-fragment
+    assert_eq "$TOOLENV_HIT" "$(readlink -f "$complete")"
+    assert_eq "$TOOLENV_HIT_SOURCE" "override"
+    assert_eq "$(_real_toolenv_which)" "$(readlink -f "$complete")"
+
+    unset TOOLENV_SYNERGY_FRAGMENT
+    _reset
+    assert_ok toolenv_resolve synergy-fragment
+    assert_eq "$TOOLENV_HIT" "$(readlink -f "$env_dir")"
+    assert_eq "$TOOLENV_HIT_SOURCE" "env:SYNERGY_FRAGMENT_DIR"
+    unset SYNERGY_FRAGMENT_DIR
+    export TOOLENV_TOOLS_DIR="$fixture_tools"
 }
 
 test_overrides_file_is_sourced() {

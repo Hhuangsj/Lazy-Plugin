@@ -76,9 +76,9 @@ single-UNK 路由需要一个只读的 Synergy-Fragment 目录。toolenv 只在�
 Synergy。缺少 Synergy 只阻塞 single-UNK；pre-resolved 和普通 MM/GBSA 仍可运行。
 
 结果判断按机器可读产物进行：先读
-`<out>/residue_decomp/decomp_manifest.json`，再按 manifest 的
-`paths.summary_csv` 读取 `ligand_decomp_summary.csv`（若当前 runner 使用
-`residue_decomp_summary.csv`，以 manifest 指向的实际路径为准）。不要只看日志猜测状态。
+`<out>/residue_decomp/decomp_manifest.json`，再读取 manifest 的
+`paths.summary_csv` 指向的 summary；当前 runner 默认文件名是
+`residue_decomp_summary.csv`。不要猜文件名，也不要只看日志判断状态。
 unknown 名称、临时 `Pnnn`/`XLINK_nnn` 和立体识别不完整是 warning；分组覆盖率低于
 100% 或有 missing/duplicate/overlap 必须视为失败。
 

@@ -134,18 +134,18 @@ bash 是按字节偏移边读边执行的。分析跑到一半时改 `drive.sh`,
 实际输出目录调整：
 
 ```bash
-CMS=/path/to/*-out.cms
+CMS=/path/to/complex-out.cms
 LIG_ASL='res.ptype UNK'
 SKILL=/path/to/Lazy-Plugin/skills/science/md-pipeline
 DECOMP_DIR=/path/to/mmgbsa_last100ns/residue_decomp
 MANIFEST="$DECOMP_DIR/decomp_manifest.json"
 RESMAP="$DECOMP_DIR/residue_map.json"
-PRIME=/path/to/mmgbsa_last100ns/*-prime-out.maegz
+PRIME=/path/to/mmgbsa_last100ns/complex-prime-out.maegz
 ```
 
 诊断顺序固定为：先读 `decomp_manifest.json` 的 `status`、`mode`、`coverage`、`error`
-和 `paths`，再读 manifest 指向的 `ligand_decomp_summary.csv`（当前 runner 若写成
-`residue_decomp_summary.csv`，以 `paths.summary_csv` 为准）。unknown 名称只是 warning；
+和 `paths`，再打开 `paths.summary_csv` 指向的 summary（当前 runner 默认文件名是
+`residue_decomp_summary.csv`）。unknown 名称只是 warning；
 coverage 不是 100%，或存在 missing/duplicate/overlap，都是失败，不能用 warning 掩盖。
 
 ### 13.1 ASL 必须选中一个完整分子
@@ -154,7 +154,7 @@ coverage 不是 100%，或存在 missing/duplicate/overlap，都是失败，不�
 ASL 选中了零个、多个或不完整的分子：
 
 ```bash
-$SCHRODINGER/run python3 - "$CMS" "$LIG_ASL" <<'PY'
+"$SCHRODINGER/run" python3 - "$CMS" "$LIG_ASL" <<'PY'
 import sys
 from schrodinger.application.desmond.packages import topo
 
@@ -245,29 +245,43 @@ PY
 ### 13.5 Prime property 缺失，尤其是 `Lig_Strain`
 
 默认请求的十个 property 必须存在于每个 Prime snapshot 的每个 ligand atom；不要把缺失
-值当成 0。先列出第一帧的实际覆盖：
+值当成 0。下面按 `residue_map.json` 的独立 `analysis_ligand_asl` 选 ligand 原子，检查
+每个 `DEFAULT_PROPERTIES` 的 missing 和 non-finite 值：
 
 ```bash
-$SCHRODINGER/run python3 - "$PRIME" <<'PY'
+"$SCHRODINGER/run" python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
+import json
+import math
 import sys
+sys.path.insert(0, sys.argv[3])
 from schrodinger.structure import StructureReader
+from schrodinger.structutils import analyze
+from mmgbsa_decomp_contract import DEFAULT_PROPERTIES
 
-required = {
-    "dG_Bind": "r_psp_MMGBSA_dG_Bind",
-    "Coulomb": "r_psp_MMGBSA_dG_Bind(NS)_Coulomb",
-    "Solv_GB": "r_psp_MMGBSA_dG_Bind(NS)_Solv_GB",
-    "Covalent": "r_psp_MMGBSA_dG_Bind(NS)_Covalent",
-    "vdW": "r_psp_MMGBSA_dG_Bind(NS)_vdW",
-    "Hbond": "r_psp_MMGBSA_dG_Bind(NS)_Hbond",
-    "Lipo": "r_psp_MMGBSA_dG_Bind(NS)_Lipo",
-    "Packing": "r_psp_MMGBSA_dG_Bind(NS)_Packing",
-    "SelfCont": "r_psp_MMGBSA_dG_Bind(NS)_SelfCont",
-    "Lig_Strain": "r_psp_Lig_Strain_Energy",
-}
+with open(sys.argv[2], encoding="utf-8") as handle:
+    residue_map = json.load(handle)
 structure = next(iter(StructureReader(sys.argv[1])))
-for label, name in required.items():
-    count = sum(name in atom.property for atom in structure.atom[1:])
-    print("{}: {}/{} atoms".format(label, count, structure.atom_total))
+ligand_asl = residue_map["analysis_ligand_asl"]
+ligand_atoms = sorted(analyze.evaluate_asl(structure, ligand_asl))
+if not ligand_atoms:
+    raise SystemExit("FAIL: analysis_ligand_asl selected zero atoms")
+print("analysis_ligand_asl:", ligand_asl)
+print("ligand atoms:", len(ligand_atoms))
+failed = False
+for label, name in DEFAULT_PROPERTIES.items():
+    missing = []
+    nonfinite = []
+    for atom_index in ligand_atoms:
+        try:
+            value = float(structure.atom[atom_index].property[name])
+            if not math.isfinite(value):
+                nonfinite.append(atom_index)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            missing.append(atom_index)
+    print("{} ({}): missing={} nonfinite={}".format(label, name, missing, nonfinite))
+    failed = failed or bool(missing or nonfinite)
+if failed:
+    raise SystemExit("FAIL: requested Prime properties are incomplete on ligand atoms")
 PY
 ```
 
@@ -278,25 +292,30 @@ PY
 ### 13.6 selector drift
 
 如果日志报 `group selector drift from analysis_ligand_asl`，检查分析 CMS 和 Prime 第一帧
-中每个保存的 selector 是否仍唯一、是否覆盖同一组：
+中每个保存的 selector 是否仍唯一，并用现有 `_validate_snapshot_partition` 同时检查
+zero、overlap 以及相对独立 `analysis_ligand_asl` 的 missing/extra：
 
 ```bash
-$SCHRODINGER/run python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
+"$SCHRODINGER/run" python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
 import json
 import sys
 sys.path.insert(0, sys.argv[3])
-from schrodinger.structure import StructureReader
-from schrodinger.structutils import analyze
-from prepare_ligand_decomp import _selector_asl
+from prime_mmgbsa_residue_decomp import (
+    _normalise_groups, _schrodinger_dependencies, _validate_snapshot_partition,
+)
 
 with open(sys.argv[2], encoding="utf-8") as handle:
     residue_map = json.load(handle)
+StructureReader, analyze, _ = _schrodinger_dependencies()
 structure = next(iter(StructureReader(sys.argv[1])))
-for group in residue_map["groups"]:
-    selected = list(analyze.evaluate_asl(structure, _selector_asl(group["selector"])))
-    print(group["group_id"], group["selector"], "atoms=", len(selected), "ids=", selected)
-    if len(selected) == 0:
-        raise SystemExit("FAIL: selector drift or zero-match group")
+ligand_asl, groups = _normalise_groups(residue_map)
+ligand_atoms, selections = _validate_snapshot_partition(
+    analyze, structure, groups, ligand_asl
+)
+print("analysis_ligand_asl atoms:", len(ligand_atoms))
+for (group_id, group_name, _), (_, _, selected) in zip(groups, selections):
+    print(group_id, group_name, "atoms=", len(selected), "ids=", sorted(selected))
+print("selector partition: zero/overlap/missing/extra checks passed")
 PY
 ```
 
@@ -313,7 +332,7 @@ grep -nEi 'reconcil|group sum|direct sum|source frame|missing property' \
 需要复核数值时，可对第一帧直接重算两边（只读 Prime 和 map，不依赖 summary）：
 
 ```bash
-$SCHRODINGER/run python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
+"$SCHRODINGER/run" python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
 import json
 import math
 import sys

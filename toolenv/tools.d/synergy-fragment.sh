@@ -2,7 +2,7 @@ TOOL_NAME="synergy-fragment"
 TOOL_DESC="Synergy-Fragment peptide residue atom mapper (read-only)"
 TOOL_HINT="Set SYNERGY_FRAGMENT_DIR or TOOLENV_SYNERGY_FRAGMENT to a Synergy-Fragment checkout"
 
-_synergy_fragment_valid() {
+tool_validate_path() {
     local root=$1
     [ -d "$root" ] \
         && [ -f "$root/peptide_sequence.py" ] \
@@ -12,7 +12,7 @@ _synergy_fragment_valid() {
 _synergy_fragment_try() {
     local root=$1 source=$2
     [ -n "$root" ] || return 1
-    _synergy_fragment_valid "$root" || return 1
+    tool_validate_path "$root" || return 1
     _te_hit "$(readlink -f "$root")" "$source"
 }
 

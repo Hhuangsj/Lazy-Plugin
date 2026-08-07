@@ -19,7 +19,7 @@ toolenv_load_manifest() {
     f="$(toolenv_tools_dir)/$tool.sh"
     [ -f "$f" ] || { echo "toolenv: 没有这个工具的 manifest: $tool ($f)" >&2; return 1; }
     TOOL_NAME=""; TOOL_DESC=""; TOOL_HINT=""
-    unset -f tool_detect tool_activate 2>/dev/null
+    unset -f tool_detect tool_activate tool_validate_path 2>/dev/null
     # shellcheck disable=SC1090
     . "$f" || return 1
     [ -n "$TOOL_NAME" ] || TOOL_NAME=$tool
@@ -39,19 +39,35 @@ _te_override_var() {   # 工具名 -> TOOLENV_XXX
 
 # toolenv_resolve TOOL —— 解析一个工具
 toolenv_resolve() {
-    local tool=$1 ovar oval
+    local tool=$1 ovar oval manifest_file manifest_loaded=0
     TOOLENV_HIT=""; TOOLENV_HIT_SOURCE=""; TOOLENV_HIT_ENV=""
     ovar=$(_te_override_var "$tool")
     oval=${!ovar:-}
+
+    # Load an existing manifest before honoring an explicit override so an
+    # optional tool_validate_path hook can validate that override. If no
+    # manifest exists, retain the historical override-only behavior.
+    manifest_file="$(toolenv_tools_dir)/$tool.sh"
+    if [ -f "$manifest_file" ]; then
+        toolenv_load_manifest "$tool" || return 1
+        manifest_loaded=1
+    fi
+
     if [ -n "$oval" ]; then
         if [ -d "$oval" ]; then
+            if [ "$manifest_loaded" = 1 ] \
+                && declare -F tool_validate_path >/dev/null \
+                && ! tool_validate_path "$oval"; then
+                echo "toolenv: $ovar override failed manifest validation for $tool: $oval" >&2
+                return 1
+            fi
             _te_hit "$(readlink -f "$oval")" "override"
             return 0
         fi
         echo "toolenv: $ovar 指向的目录不存在: $oval" >&2
         return 1
     fi
-    toolenv_load_manifest "$tool" || return 1
+    [ "$manifest_loaded" = 1 ] || toolenv_load_manifest "$tool" || return 1
     # manifest 里引用未设置的环境变量是常态(可选路径线索),别让 set -u 打断探测
     local had_u=0
     case "$-" in *u*) had_u=1; set +u ;; esac
