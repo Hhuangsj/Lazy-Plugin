@@ -27,6 +27,8 @@ Existing Align behavior and `ALIGN_CMS`/`ALIGN_TRJ` compatibility remain unchang
 
 `run_mmgbsa.sh` sources `trajectory_source.sh` and exposes `TRAJECTORY_SOURCE`, `ALIGN_CMS`, `ALIGN_TRJ`, `RAW_CMS`, and `RAW_TRJ`, defaulting to raw automatic selection.
 
+When `OUT_NAME` is unset, raw selection keeps `mmgbsa_last100ns` and Align selection uses `mmgbsa_last100ns_align`, so an Align run cannot overwrite the raw result. An explicit safe `OUT_NAME` still overrides either default.
+
 For each MD directory, the runner selects one pair before constructing or deleting its output directory. Selection failure returns 1, preserves existing output, performs no external MM/GBSA call, and does not create a DECOMP manifest.
 
 Normal thermal MM/GBSA receives the selected CMS. DECOMP receives both the selected CMS and selected trajectory; it no longer scans every `*_trj` entry. An unrelated or Align trajectory may coexist with the raw trajectory without causing raw DECOMP to fail.
@@ -39,4 +41,4 @@ Normal thermal MM/GBSA receives the selected CMS. DECOMP receives both the selec
 
 ## Tests and documentation
 
-Behavior tests prove automatic raw ambiguity fails before output deletion, `RAW_CMS` resolves it, Align selection reaches thermal MM/GBSA, and raw DECOMP succeeds when an Align pair coexists. Selector tests cover explicit raw CMS derivation, explicit raw trajectory override, and missing explicit inputs. The skill documentation describes the same variables for event analysis, PLIP, MM/GBSA, and DECOMP.
+Behavior tests prove automatic raw ambiguity fails before output deletion, `RAW_CMS` resolves it, Align selection reaches thermal MM/GBSA without overwriting raw output, and raw DECOMP succeeds when an Align pair coexists. Selector tests cover explicit raw CMS derivation, explicit raw trajectory override, and missing explicit inputs. The skill documentation describes the same variables for event analysis, PLIP, MM/GBSA, and DECOMP.
