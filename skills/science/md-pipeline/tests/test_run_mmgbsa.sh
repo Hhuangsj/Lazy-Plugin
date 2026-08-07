@@ -203,6 +203,19 @@ assert_argv() {
     done
 }
 
+assert_argv_option() {
+    local call_index=$1 option=$2 expected=$3 index
+    load_call "$call_index"
+    for ((index = 0; index < ${#CALL_ARGS[@]}; index++)); do
+        if [ "${CALL_ARGS[$index]}" = "$option" ]; then
+            assert_eq "${CALL_ARGS[$((index + 1))]:-}" "$expected" \
+                "$option for call $call_index"
+            return
+        fi
+    done
+    fail "call $call_index has no $option option"
+}
+
 call_kind() {
     load_call "$1"
     if [ "${CALL_ARGS[0]:-}" = thermal_mmgbsa.py ]; then
@@ -322,6 +335,93 @@ test_default_mixed_directories_keep_first_failure_and_run_later_directory() {
         FAIL_STAGE=thermal FAIL_DIRECTORY="$failed"
 
     assert_kind_count thermal 2
+}
+
+test_ambiguous_raw_pairs_fail_before_output_is_removed() {
+    install_fake_environment
+    local directory output
+    directory=$(make_md_directory)
+    : > "$directory/second-out.cms"
+    mkdir "$directory/second_trj"
+    output="$directory/mmgbsa_last100ns"
+    mkdir -p "$output"
+    printf 'keep\n' > "$output/sentinel"
+
+    assert_status 1 run_mmgbsa "$directory" env
+
+    assert_call_count 0
+    [ -f "$output/sentinel" ] || fail "ambiguous raw selection removed existing output"
+}
+
+test_explicit_raw_cms_resolves_ambiguity() {
+    install_fake_environment
+    local directory
+    directory=$(make_md_directory)
+    : > "$directory/second-out.cms"
+    mkdir "$directory/second_trj"
+
+    assert_status 0 run_mmgbsa "$directory" env RAW_CMS=second-out.cms
+
+    assert_call_kinds thermal
+    assert_argv 1 thermal_mmgbsa.py "$directory/second-out.cms" \
+        -lig_asl 'res.ptype UNK' -j second \
+        -start_frame 1000 -end_frame 2000 -step_size 20 \
+        -NJOBS 8 -HOST localhost:8
+}
+
+test_align_selection_uses_align_pair_and_preserves_raw_output() {
+    install_fake_environment
+    local directory raw_output align_output
+    directory=$(make_md_directory)
+    : > "$directory/PL_Analysis_ALIGN-out.cms"
+    mkdir "$directory/PL_Analysis_ALIGN_trj"
+    raw_output="$directory/mmgbsa_last100ns"
+    align_output="$directory/mmgbsa_last100ns_align"
+    mkdir -p "$raw_output"
+    printf 'keep\n' > "$raw_output/sentinel"
+
+    assert_status 0 run_mmgbsa "$directory" env TRAJECTORY_SOURCE=align
+
+    assert_call_kinds thermal
+    assert_argv 1 thermal_mmgbsa.py "$directory/PL_Analysis_ALIGN-out.cms" \
+        -lig_asl 'res.ptype UNK' -j PL_Analysis_ALIGN \
+        -start_frame 1000 -end_frame 2000 -step_size 20 \
+        -NJOBS 8 -HOST localhost:8
+    [ -f "$raw_output/sentinel" ] || fail "Align selection removed raw MMGBSA output"
+    [ -d "$align_output" ] || fail "Align MMGBSA output directory was not created"
+}
+
+test_missing_selected_trajectory_fails_before_output_is_removed() {
+    install_fake_environment
+    local directory output
+    directory=$(make_md_directory)
+    rmdir "$directory/complex_trj"
+    output="$directory/mmgbsa_last100ns"
+    mkdir -p "$output"
+    printf 'keep\n' > "$output/sentinel"
+
+    assert_status 1 run_mmgbsa "$directory" env
+
+    assert_call_count 0
+    [ -f "$output/sentinel" ] || fail "missing trajectory removed existing output"
+}
+
+test_mmgbsa_rejects_trajectory_overrides_thermal_cannot_honor() {
+    install_fake_environment
+    local directory
+    directory=$(make_md_directory)
+
+    assert_status 2 run_mmgbsa "$directory" env RAW_TRJ="$SANDBOX/other_raw_trj"
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "RAW_CMS"
+
+    : > "$directory/PL_Analysis_ALIGN-out.cms"
+    mkdir "$directory/PL_Analysis_ALIGN_trj"
+    reset_call_capture
+    assert_status 2 run_mmgbsa "$directory" env \
+        TRAJECTORY_SOURCE=align ALIGN_TRJ="$SANDBOX/other_align_trj"
+    assert_call_count 0
+    assert_contains "$(cat "$SANDBOX/stderr.log")" "ALIGN_CMS"
 }
 
 test_unsafe_output_names_fail_before_removal_or_external_calls() {
@@ -568,30 +668,34 @@ test_manifest_fail_errors_do_not_mask_prepare_thermal_or_aggregation_rc() {
     assert_call_kinds prepare json json json thermal aggregation manifest
 }
 
-test_decomp_requires_exactly_one_main_trajectory() {
+test_decomp_uses_selected_raw_trajectory_when_align_pair_coexists() {
     install_fake_environment
-    local directory decomp_dir
+    local directory
     directory=$(make_md_directory)
-    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
-    mkdir "$directory/second_trj"
+    : > "$directory/custom_ALIGN-out.cms"
+    mkdir "$directory/custom_ALIGN_trj"
 
-    assert_status 2 run_mmgbsa "$directory" env DECOMP=1
+    assert_status 0 run_mmgbsa "$directory" env DECOMP=1
 
-    assert_call_kinds prepare json json json manifest
-    assert_manifest_failure "$directory" trajectory 2 "$decomp_dir/prepare_ligand_decomp.log"
+    assert_call_kinds prepare json json json thermal aggregation
+    assert_argv_option 6 --trajectory "$directory/complex_trj"
 }
 
 test_decomp_rejects_missing_main_trajectory() {
     install_fake_environment
-    local directory decomp_dir
+    local directory output manifest
     directory=$(make_md_directory)
-    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
     rmdir "$directory/complex_trj"
+    output="$directory/mmgbsa_last100ns"
+    manifest="$output/residue_decomp/decomp_manifest.json"
+    mkdir -p "$output"
+    printf 'keep\n' > "$output/sentinel"
 
-    assert_status 2 run_mmgbsa "$directory" env DECOMP=1
+    assert_status 1 run_mmgbsa "$directory" env DECOMP=1
 
-    assert_call_kinds prepare json json json manifest
-    assert_manifest_failure "$directory" trajectory 2 "$decomp_dir/prepare_ligand_decomp.log"
+    assert_call_count 0
+    [ -f "$output/sentinel" ] || fail "missing DECOMP trajectory removed existing output"
+    [ ! -e "$manifest" ] || fail "selection failure created a DECOMP manifest"
 }
 
 test_decomp_requires_exactly_one_prime_maegz() {

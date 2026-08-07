@@ -25,7 +25,7 @@ Existing Align behavior and `ALIGN_CMS`/`ALIGN_TRJ` compatibility remain unchang
 
 ## MMGBSA integration
 
-`run_mmgbsa.sh` sources `trajectory_source.sh` and exposes `TRAJECTORY_SOURCE`, `ALIGN_CMS`, `ALIGN_TRJ`, `RAW_CMS`, and `RAW_TRJ`, defaulting to raw automatic selection.
+`run_mmgbsa.sh` sources `trajectory_source.sh` and exposes `TRAJECTORY_SOURCE`, `ALIGN_CMS`, and `RAW_CMS`, defaulting to raw automatic selection. It deliberately does not expose `ALIGN_TRJ` or `RAW_TRJ`: Schrödinger 2023-4 `thermal_mmgbsa.py` accepts only a CMS and resolves the trajectory recorded by that CMS, so a separate trajectory override would validate one path while potentially calculating another. A relevant trajectory override supplied to MMGBSA fails with status 2 and directs the user to the CMS override. The generic selector retains trajectory overrides for event analysis and PLIP.
 
 When `OUT_NAME` is unset, raw selection keeps `mmgbsa_last100ns` and Align selection uses `mmgbsa_last100ns_align`, so an Align run cannot overwrite the raw result. An explicit safe `OUT_NAME` still overrides either default.
 

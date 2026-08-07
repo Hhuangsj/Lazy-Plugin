@@ -4,8 +4,10 @@
 select_trajectory_pair() {
     local dir="${1:-}"
     local source="${2:-raw}"
-    local align_cms="${3:-${ALIGN_CMS:-}}"
-    local align_trj="${4:-${ALIGN_TRJ:-}}"
+    local align_cms="${3-${ALIGN_CMS:-}}"
+    local align_trj="${4-${ALIGN_TRJ:-}}"
+    local raw_cms="${5-${RAW_CMS:-}}"
+    local raw_trj="${6-${RAW_TRJ:-}}"
     local cms=""
     local trj=""
     local base=""
@@ -29,30 +31,43 @@ select_trajectory_pair() {
 
     case "$source" in
         raw)
-            old_nullglob="$(shopt -p nullglob)"
-            shopt -s nullglob
-            for candidate in "$dir"/*-out.cms; do
-                candidate_base="${candidate##*/}"
-                [[ "$candidate_base" == PL_Analysis* ]] && continue
-                [[ "$candidate_base" =~ _[0-9]+-out\.cms$ ]] && continue
-                candidates+=("$candidate")
-            done
-            eval "$old_nullglob"
+            if [ -n "$raw_cms" ]; then
+                cms="$(resolve_inside_dir "$raw_cms")"
+                if [ ! -f "$cms" ]; then
+                    echo "ERROR: explicit raw CMS does not exist: $cms" >&2
+                    return 1
+                fi
+            else
+                old_nullglob="$(shopt -p nullglob)"
+                shopt -s nullglob
+                for candidate in "$dir"/*-out.cms; do
+                    candidate_base="${candidate##*/}"
+                    [[ "$candidate_base" == *_ALIGN-out.cms ]] && continue
+                    [[ "$candidate_base" == PL_Analysis* ]] && continue
+                    [[ "$candidate_base" =~ _[0-9]+-out\.cms$ ]] && continue
+                    candidates+=("$candidate")
+                done
+                eval "$old_nullglob"
 
-            if [ "${#candidates[@]}" -eq 0 ]; then
-                echo "ERROR: no raw *-out.cms found in $dir" >&2
-                return 1
-            fi
-            if [ "${#candidates[@]}" -gt 1 ]; then
-                echo "ERROR: multiple raw *-out.cms files found; remove ambiguity:" >&2
-                printf '  %s\n' "${candidates[@]##*/}" >&2
-                return 1
+                if [ "${#candidates[@]}" -eq 0 ]; then
+                    echo "ERROR: no raw *-out.cms found in $dir" >&2
+                    return 1
+                fi
+                if [ "${#candidates[@]}" -gt 1 ]; then
+                    echo "ERROR: multiple raw *-out.cms files found; set RAW_CMS (and optionally RAW_TRJ):" >&2
+                    printf '  %s\n' "${candidates[@]##*/}" >&2
+                    return 1
+                fi
+                cms="${candidates[0]}"
             fi
 
-            cms="${candidates[0]}"
             base="${cms##*/}"
             base="${base%-out.cms}"
-            trj="$dir/${base}_trj"
+            if [ -n "$raw_trj" ]; then
+                trj="$(resolve_inside_dir "$raw_trj")"
+            else
+                trj="${cms%-out.cms}_trj"
+            fi
             ;;
         align)
             if [ -n "$align_cms" ]; then

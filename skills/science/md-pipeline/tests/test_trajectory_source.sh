@@ -41,6 +41,61 @@ else
     fail "raw main pair should be selectable"
 fi
 
+MIXED_DIR="$TMP_DIR/raw-with-custom-align"
+mkdir -p "$MIXED_DIR/system_trj" "$MIXED_DIR/custom_ALIGN_trj"
+touch "$MIXED_DIR/system-out.cms" "$MIXED_DIR/custom_ALIGN-out.cms"
+if select_trajectory_pair "$MIXED_DIR" raw; then
+    assert_pair "raw selection ignores custom Align pair" \
+        "$MIXED_DIR/system-out.cms" "$MIXED_DIR/system_trj"
+else
+    fail "raw selection should ignore a custom Align pair"
+fi
+
+touch "$TMP_DIR/second-out.cms"
+mkdir -p "$TMP_DIR/second_trj"
+if select_trajectory_pair "$TMP_DIR" raw >/dev/null 2>&1; then
+    fail "ambiguous raw pair should fail"
+else
+    pass "ambiguous raw pair fails"
+fi
+
+if select_trajectory_pair "$TMP_DIR" raw "" "" "$TMP_DIR/second-out.cms"; then
+    assert_pair "explicit raw CMS derives trajectory" "$TMP_DIR/second-out.cms" "$TMP_DIR/second_trj"
+else
+    fail "explicit raw CMS should resolve ambiguity"
+fi
+
+mkdir -p "$TMP_DIR/custom_raw_trj"
+if select_trajectory_pair "$TMP_DIR" raw "" "" \
+        "$TMP_DIR/system-out.cms" "$TMP_DIR/custom_raw_trj"; then
+    assert_pair "explicit raw trajectory overrides derivation" \
+        "$TMP_DIR/system-out.cms" "$TMP_DIR/custom_raw_trj"
+else
+    fail "explicit raw trajectory should override derivation"
+fi
+
+if RAW_CMS="$TMP_DIR/system-out.cms" RAW_TRJ="$TMP_DIR/custom_raw_trj" \
+        select_trajectory_pair "$TMP_DIR" raw; then
+    assert_pair "raw environment overrides are honored" \
+        "$TMP_DIR/system-out.cms" "$TMP_DIR/custom_raw_trj"
+else
+    fail "raw environment overrides should be honored"
+fi
+
+if select_trajectory_pair "$TMP_DIR" raw "" "" \
+        "$TMP_DIR/missing-out.cms" >/dev/null 2>&1; then
+    fail "missing explicit raw CMS should fail"
+else
+    pass "missing explicit raw CMS fails"
+fi
+
+if select_trajectory_pair "$TMP_DIR" raw "" "" \
+        "$TMP_DIR/system-out.cms" "$TMP_DIR/missing_trj" >/dev/null 2>&1; then
+    fail "missing explicit raw trajectory should fail"
+else
+    pass "missing explicit raw trajectory fails"
+fi
+
 if select_trajectory_pair "$TMP_DIR" align; then
     assert_pair "unique align pair" "$TMP_DIR/PL_Analysis_ALIGN-out.cms" "$TMP_DIR/PL_Analysis_ALIGN_trj"
 else
@@ -75,7 +130,7 @@ else
     pass "ambiguous align pair fails"
 fi
 
-for entrypoint in run_analysis.sh run_plip.sh; do
+for entrypoint in run_analysis.sh run_plip.sh run_mmgbsa.sh; do
     entrypoint_path="$SCRIPT_DIR/$entrypoint"
     if grep -q 'trajectory_source.sh' "$entrypoint_path" && grep -q 'TRAJECTORY_SOURCE' "$entrypoint_path"; then
         pass "$entrypoint integrates trajectory source selector: $entrypoint"

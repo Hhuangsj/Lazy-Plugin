@@ -12,7 +12,7 @@
 
 - Default to automatic raw pair selection.
 - Fail automatic raw or Align ambiguity rather than selecting the first match.
-- Support `RAW_CMS`/`RAW_TRJ` and existing `ALIGN_CMS`/`ALIGN_TRJ` overrides.
+- Support `RAW_CMS` and `ALIGN_CMS` in MMGBSA; retain trajectory overrides in the generic selector for event analysis and PLIP.
 - Select before deleting or creating MM/GBSA output.
 - Use the same selected pair for normal and `DECOMP=1` routes.
 - Default Align output to `mmgbsa_last100ns_align` so raw output is not overwritten.
@@ -80,7 +80,7 @@ Expected: the legacy `head -1` path silently selects a raw CMS, ignores override
 
 - [ ] **Step 3: Integrate the shared selector**
 
-Source `trajectory_source.sh`; define `TRAJECTORY_SOURCE`, `ALIGN_CMS`, `ALIGN_TRJ`, `RAW_CMS`, and `RAW_TRJ`; update metadata usage. Default an unset `OUT_NAME` according to the selected source. In `run_one`, call the selector first, assign `cms`, `trj`, and `name` from exported selected values, then construct/remove output. Update the existing missing-trajectory test to the new fail-fast, output-preserving behavior.
+Source `trajectory_source.sh`; define `TRAJECTORY_SOURCE`, `ALIGN_CMS`, and `RAW_CMS`; update metadata usage. Pass explicit empty trajectory overrides so thermal MM/GBSA always validates the CMS-associated pair. Default an unset `OUT_NAME` according to the selected source. In `run_one`, call the selector first, assign `cms`, `trj`, and `name` from exported selected values, then construct/remove output. Update the existing missing-trajectory test to the new fail-fast, output-preserving behavior.
 
 - [ ] **Step 4: Run the MMGBSA suite and verify normal-route GREEN**
 
@@ -95,7 +95,7 @@ Expected: normal-route selection and fail-fast missing-trajectory tests pass; th
 - Modify: `skills/science/md-pipeline/scripts/run_mmgbsa.sh`
 
 **Interfaces:**
-- Consumes: `run_decomp DIR CMS TRJ NAME OUT`.
+- Consumes: `run_decomp CMS TRJ NAME OUT`.
 - Produces: preparation, trajectory link, thermal calculation, and aggregation consistently using `TRJ`.
 
 - [ ] **Step 1: Add the raw-plus-Align coexistence test and update fail-fast expectations**
@@ -110,7 +110,7 @@ Expected: DECOMP still scans both trajectory directories and returns 2.
 
 - [ ] **Step 3: Pass and consume the selected trajectory**
 
-Change `run_decomp` to accept `trj` as its third argument, shift `name` and `out`, remove the `"$dir"/*_trj` scan and exact-count branch, and pass `trj` from `run_one`.
+Change `run_decomp` to accept `CMS TRJ NAME OUT`, remove the `"$dir"/*_trj` scan and exact-count branch, and pass the selected `trj` from `run_one`.
 
 - [ ] **Step 4: Run MMGBSA and selector suites GREEN**
 

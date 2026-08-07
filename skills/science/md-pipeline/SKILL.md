@@ -85,10 +85,18 @@ Synergy。缺少 Synergy 只阻塞 single-UNK；pre-resolved 和普通 MM/GBSA �
 unknown 名称、临时 `Pnnn`/`XLINK_nnn` 和立体识别不完整是 warning；分组覆盖率低于
 100% 或有 missing/duplicate/overlap 必须视为失败。
 
-已有 AutoTRJ Align 产物时，可用 `TRAJECTORY_SOURCE=align` 让 event_analysis 和 PLIP
-读取同一对 `*_ALIGN-out.cms` + `*_ALIGN_trj`；Align event 报告写入 `analysis_align/`,
-PLIP 默认写入 `plip_last100ns_align/`，不会覆盖 raw 结果。多个 Align 产物时用
-`ALIGN_CMS=/path/to/*_ALIGN-out.cms` 指定目标，必要时再设置 `ALIGN_TRJ`。
+已有 AutoTRJ Align 产物时，可用 `TRAJECTORY_SOURCE=align` 让 event_analysis、PLIP、
+MM/GBSA（含 `DECOMP=1`）读取同一对 `*_ALIGN-out.cms` + `*_ALIGN_trj`；Align event
+报告写入 `analysis_align/`，PLIP 默认写入 `plip_last100ns_align/`，MM/GBSA 默认写入
+`mmgbsa_last100ns_align/`，都不会覆盖 raw 结果。多个 Align 产物时用
+`ALIGN_CMS=/path/to/*_ALIGN-out.cms` 指定目标。`ALIGN_TRJ` 仅供 event_analysis/PLIP
+显式覆盖；thermal MM/GBSA 只能读取 CMS 内记录的同目录关联轨迹，因此 MM/GBSA 应选择
+正确 CMS，而不能用 `ALIGN_TRJ` 改绑另一条轨迹。
+
+raw 模式也要求唯一完整的 `*-out.cms` + `*_trj` pair；多个 raw 产物并存时用
+`RAW_CMS=/path/to/target-out.cms` 消除歧义。`RAW_TRJ` 可供 event_analysis/PLIP 使用，
+但不适用于 thermal MM/GBSA；MM/GBSA 检测到相应 `*_TRJ` 覆盖变量时会返回 2，避免
+静默忽略。选择失败发生在分析输出删除之前，不会静默取第一个 CMS。
 
 ## 分析前必做:查清配体到底是什么
 

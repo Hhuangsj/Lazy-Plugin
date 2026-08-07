@@ -2,7 +2,7 @@
 # @name: run_mmgbsa
 # @description: Schrodinger Prime MMGBSA 逐帧结合自由能(默认后 100ns 每 20 帧)
 # @requires: schrodinger, conda, conda:md
-# @usage: START=1000 END=2000 STEP=20 NJOBS=4 run_mmgbsa.sh <md-dir>...
+# @usage: START=1000 END=2000 STEP=20 NJOBS=4 [TRAJECTORY_SOURCE=align] run_mmgbsa.sh <md-dir>...
 # run_mmgbsa.sh — 对已完成的 MD 目录跑薛定谔 thermal_mmgbsa(Prime MMGBSA,默认后 100ns 抽样)
 # ---------------------------------------------------------------------------
 # 从实战沉淀(见 README「MMGBSA 默认关闭」踩坑记录):
@@ -23,6 +23,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/env.sh"
 # shellcheck disable=SC1091
 source "$HERE/output_name.sh"
+# shellcheck disable=SC1091
+source "$HERE/trajectory_source.sh"
 md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
 
 # ===== 可覆盖参数(默认:后 100ns,每 20 帧一帧 ≈ 51 帧)=====
@@ -35,8 +37,15 @@ DECOMP_THERMAL_END=""
 # => NJOBS=8 时 8 个子作业同时跑 = 8 核。真正决定并发的是 -HOST 的 ":N",不是 hosts
 #    的 processors(见 README 踩坑记录 7)。要几核就把 NJOBS 设几。
 NJOBS="${NJOBS:-8}"
+TRAJECTORY_SOURCE="${TRAJECTORY_SOURCE:-raw}"
+ALIGN_CMS="${ALIGN_CMS:-}"
+RAW_CMS="${RAW_CMS:-}"
 if [ -z "${OUT_NAME+x}" ]; then
-    OUT_NAME="mmgbsa_last100ns"
+    if [ "$TRAJECTORY_SOURCE" = align ]; then
+        OUT_NAME="mmgbsa_last100ns_align"
+    else
+        OUT_NAME="mmgbsa_last100ns"
+    fi
 fi
 DECOMP="${DECOMP:-0}"
 DECOMP_PROPERTIES="${DECOMP_PROPERTIES:-}"
@@ -45,6 +54,20 @@ SYNERGY_ADAPTER_PYTHON="${SYNERGY_ADAPTER_PYTHON:-}"
 
 [ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
 validate_analysis_output_name "$OUT_NAME" || exit $?
+case "$TRAJECTORY_SOURCE" in
+    raw)
+        if [ -n "${RAW_TRJ:-}" ]; then
+            echo "ERROR: thermal MM/GBSA 不能使用 RAW_TRJ；请用 RAW_CMS 选择记录了目标轨迹的 CMS。" >&2
+            exit 2
+        fi
+        ;;
+    align)
+        if [ -n "${ALIGN_TRJ:-}" ]; then
+            echo "ERROR: thermal MM/GBSA 不能使用 ALIGN_TRJ；请用 ALIGN_CMS 选择记录了目标轨迹的 CMS。" >&2
+            exit 2
+        fi
+        ;;
+esac
 
 normalize_decimal() {
     DECIMAL_VALUE=$1
@@ -103,16 +126,16 @@ PY
 }
 
 run_decomp() {
-    local dir=$1 cms=$2 name=$3 out=$4
+    local cms=$1 trj=$2 name=$3 out=$4
     local decomp_dir="$out/residue_decomp"
     local manifest="$decomp_dir/decomp_manifest.json"
     local prepare_log="$decomp_dir/prepare_ligand_decomp.log"
     local thermal_log="$decomp_dir/thermal_mmgbsa.log"
     local aggregate_log="$decomp_dir/prime_mmgbsa_residue_decomp.log"
     local prepare_result="$decomp_dir/prepare_result.json"
-    local analysis_cms analysis_ligand_asl residue_map trj trj_real
+    local analysis_cms analysis_ligand_asl residue_map trj_real
     local analysis_trajectory analysis_trajectory_real prime_maegz rc
-    local -a prepare_args aggregate_args trajectories prime_outputs
+    local -a prepare_args aggregate_args prime_outputs
 
     mkdir -p "$decomp_dir"
     prepare_args=(python3 "$HERE/prepare_ligand_decomp.py" "$cms" --lig-asl "$LIG_ASL" --out-dir "$decomp_dir")
@@ -147,15 +170,6 @@ run_decomp() {
         return "$rc"
     fi
 
-    shopt -s nullglob
-    trajectories=("$dir"/*_trj)
-    shopt -u nullglob
-    if [ "${#trajectories[@]}" -ne 1 ]; then
-        echo "ERROR: $dir 下主 *_trj 必须恰好一个。" >&2
-        mark_decomp_failed "$manifest" trajectory 2 "$prepare_log"
-        return 2
-    fi
-    trj=${trajectories[0]}
     trj_real="$(readlink -f -- "$trj" 2>/dev/null)"
     if [ -z "$trj_real" ]; then
         echo "ERROR: 无法解析源轨迹: $trj" >> "$prepare_log"
@@ -215,16 +229,15 @@ run_decomp() {
 
 run_one() {
     local dir; dir="$(cd "$1" 2>/dev/null && pwd)" || { echo "ERROR: 目录无效: $1"; return 1; }
-    # 自动探测主 -out.cms(排除 PL_Analysis* 与 *_N-out.cms);不假设文件夹名==文件名。
-    local cms; cms="$(ls "$dir"/*-out.cms 2>/dev/null | grep -v PL_Analysis | grep -vE '_[0-9]+-out\.cms$' | head -1)"
-    [ -n "$cms" ] || { echo "ERROR: $dir 下找不到主 -out.cms,跳过。"; return 1; }
-    local name; name="$(basename "$cms")"; name="${name%-out.cms}"
+    select_trajectory_pair "$dir" "$TRAJECTORY_SOURCE" \
+        "$ALIGN_CMS" "" "$RAW_CMS" "" || return 1
+    local cms="$SELECTED_CMS" trj="$SELECTED_TRJ" name="$SELECTED_BASE"
     local out="$dir/$OUT_NAME"
     echo "==================== $(date '+%F %T') MMGBSA START $name ===================="
     rm -rf "$out"; mkdir -p "$out"
     local rc
     if [ "$DECOMP" = 1 ]; then
-        run_decomp "$dir" "$cms" "$name" "$out"
+        run_decomp "$cms" "$trj" "$name" "$out"
         rc=$?
     else
         # 关键:-HOST 必须带处理器数 localhost:N 才会并发!thermal_mmgbsa 把命令行 -HOST
