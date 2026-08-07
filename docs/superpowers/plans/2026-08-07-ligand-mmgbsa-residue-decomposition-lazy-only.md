@@ -96,4 +96,3 @@ Document routing: one UNK → `DECOMP=1`, Synergy required, `Pnnn`/caps/XLINK; p
 ### Task 7: Run real smoke tests and final verification
 
 No generated artifact is committed. On `NPR1-SYN-007714-16473-md-out.cms`, single-UNK preparation must yield 13 residues, one N cap, one C cap, one XLINK, 124 heavy atoms, 133 explicit H, 257 assigned, zero missing/duplicate. Re-read source/analysis chemistry and coordinates. Run one or two snapshot thermal MM/GBSA in a disposable directory and require all ten properties, nonempty CSVs, success manifest, and reconciliation. Run pre-resolved smoke without Synergy. Run all new Lazy focused tests, `test_env_shim.sh`, toolenv tests/selftest, `git diff --check`, status/log checks, and confirm no Synergy commit is part of the deliverable.
-
