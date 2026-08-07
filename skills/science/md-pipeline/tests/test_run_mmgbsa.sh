@@ -324,6 +324,36 @@ test_default_mixed_directories_keep_first_failure_and_run_later_directory() {
     assert_kind_count thermal 2
 }
 
+test_unsafe_output_names_fail_before_removal_or_external_calls() {
+    install_fake_environment
+    local directory victim output_name
+    directory=$(make_md_directory)
+    victim="$SANDBOX/victim"
+
+    for output_name in '' . .. ../victim nested/output /absolute; do
+        mkdir -p "$victim"
+        printf 'keep\n' > "$victim/sentinel"
+        reset_call_capture
+
+        assert_status 2 run_mmgbsa "$directory" env OUT_NAME="$output_name"
+
+        [ -f "$victim/sentinel" ] \
+            || fail "unsafe OUT_NAME removed sibling sentinel: $(printf %q "$output_name")"
+        assert_call_count 0
+    done
+}
+
+test_safe_custom_output_name_runs_mmgbsa() {
+    install_fake_environment
+    local directory
+    directory=$(make_md_directory)
+
+    assert_status 0 run_mmgbsa "$directory" env OUT_NAME='safe name-结果'
+
+    assert_call_kinds thermal
+    [ -d "$directory/safe name-结果" ] || fail "safe custom output directory was not created"
+}
+
 test_decomp_rejects_invalid_frame_ranges_before_external_calls() {
     install_fake_environment
     local directory

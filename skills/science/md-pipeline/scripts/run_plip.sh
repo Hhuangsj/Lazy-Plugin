@@ -32,6 +32,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/env.sh"
 # shellcheck disable=SC1091
 source "$HERE/trajectory_source.sh"
+# shellcheck disable=SC1091
+source "$HERE/output_name.sh"
 md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
 command -v plip >/dev/null 2>&1 || { echo "ERROR: 找不到 plip(应在 conda '$MD_CONDA_ENV' 环境里)"; exit 1; }
 
@@ -59,6 +61,7 @@ fi
 THRESHOLD="${THRESHOLD:-20}"                      # 高占据残基对过滤阈值(%)
 
 [ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
+validate_analysis_output_name "$OUT_NAME" || exit $?
 
 run_one() {
     local dir; dir="$(cd "$1" 2>/dev/null && pwd)" || { echo "ERROR: 目录无效: $1"; return 1; }

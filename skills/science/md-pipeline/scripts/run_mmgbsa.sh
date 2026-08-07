@@ -21,6 +21,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/env.sh"
+# shellcheck disable=SC1091
+source "$HERE/output_name.sh"
 md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
 
 # ===== 可覆盖参数(默认:后 100ns,每 20 帧一帧 ≈ 51 帧)=====
@@ -33,13 +35,16 @@ DECOMP_THERMAL_END=""
 # => NJOBS=8 时 8 个子作业同时跑 = 8 核。真正决定并发的是 -HOST 的 ":N",不是 hosts
 #    的 processors(见 README 踩坑记录 7)。要几核就把 NJOBS 设几。
 NJOBS="${NJOBS:-8}"
-OUT_NAME="${OUT_NAME:-mmgbsa_last100ns}"
+if [ -z "${OUT_NAME+x}" ]; then
+    OUT_NAME="mmgbsa_last100ns"
+fi
 DECOMP="${DECOMP:-0}"
 DECOMP_PROPERTIES="${DECOMP_PROPERTIES:-}"
 SYNERGY_FRAGMENT_DIR="${SYNERGY_FRAGMENT_DIR:-}"
 SYNERGY_ADAPTER_PYTHON="${SYNERGY_ADAPTER_PYTHON:-}"
 
 [ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
+validate_analysis_output_name "$OUT_NAME" || exit $?
 
 normalize_decimal() {
     DECIMAL_VALUE=$1

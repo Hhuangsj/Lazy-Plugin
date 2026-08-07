@@ -113,6 +113,10 @@ assert_call_count() {
     assert_eq "$(wc -l < "$SANDBOX/calls.log")" "$1" "external call count"
 }
 
+reset_call_log() {
+    : > "$SANDBOX/calls.log"
+}
+
 test_plip_failure_survives_cleanup_and_later_directory_runs() {
     install_fake_environment
     local failed successful
@@ -139,6 +143,43 @@ test_plip_all_success_returns_zero() {
         FAIL_DIRECTORY="$SANDBOX/never" OUT_NAME=plip-test
 
     assert_call_count 2
+}
+
+test_plip_unsafe_output_names_fail_before_removal_or_external_calls() {
+    install_fake_environment
+    local first second victim output_name
+    first="$SANDBOX/md-first"
+    second="$SANDBOX/md-second"
+    victim="$SANDBOX/victim"
+
+    for output_name in '' . .. ../victim nested/output /absolute; do
+        make_md_directory_at "$first" >/dev/null
+        make_md_directory_at "$second" >/dev/null
+        mkdir -p "$victim"
+        printf 'keep\n' > "$victim/sentinel"
+        reset_call_log
+
+        assert_status 2 run_plip_many "$first" "$second" env \
+            FAIL_DIRECTORY="$SANDBOX/never" OUT_NAME="$output_name"
+
+        [ -f "$victim/sentinel" ] \
+            || fail "unsafe PLIP OUT_NAME removed sibling sentinel: $(printf %q "$output_name")"
+        assert_call_count 0
+    done
+}
+
+test_plip_safe_custom_output_name_runs() {
+    install_fake_environment
+    local first second
+    first=$(make_md_directory_at "$SANDBOX/success-first")
+    second=$(make_md_directory_at "$SANDBOX/success-second")
+
+    assert_status 0 run_plip_many "$first" "$second" env \
+        FAIL_DIRECTORY="$SANDBOX/never" OUT_NAME='safe name-结果'
+
+    assert_call_count 2
+    [ -d "$first/safe name-结果" ] || fail "first safe custom PLIP output was not created"
+    [ -d "$second/safe name-结果" ] || fail "second safe custom PLIP output was not created"
 }
 
 test_analysis_autotrj_failure_propagates_and_later_directory_runs() {
