@@ -491,6 +491,19 @@ def _summary_rows(values_by_group_property, groups, properties):
     return rows
 
 
+def _validate_distinct_csv_targets(frame_csv_path, summary_csv_path):
+    frame_path = Path(frame_csv_path)
+    summary_path = Path(summary_csv_path)
+    if frame_path.resolve() == summary_path.resolve():
+        raise AggregationError("frame CSV and summary CSV must be distinct files")
+    try:
+        same_file = os.path.samefile(str(frame_path), str(summary_path))
+    except (FileNotFoundError, OSError):
+        same_file = False
+    if same_file:
+        raise AggregationError("frame CSV and summary CSV must be distinct files")
+
+
 def aggregate_prime_mmgbsa(
     prime_maegz,
     residue_map_path,
@@ -511,6 +524,7 @@ def aggregate_prime_mmgbsa(
             raise AggregationError("frame indices must be integers")
         if start < 0 or end < start or step <= 0:
             raise AggregationError("invalid inclusive frame range")
+        _validate_distinct_csv_targets(frame_csv_path, summary_csv_path)
         source_indices = list(range(start, end + 1, step))
         properties = _normalise_properties(properties)
         residue_map = load_json(residue_map_path)

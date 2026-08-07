@@ -211,8 +211,12 @@ from prepare_ligand_decomp import _source_heavy_graph, validate_sdf_round_trip
 _, cms = topo.read_cms(sys.argv[1])
 with open(sys.argv[3], encoding="utf-8") as handle:
     heavy = [int(gid) for _, gid in sorted(json.load(handle).items(), key=lambda pair: int(pair[0]))]
-mol = next(m for m in Chem.SDMolSupplier(sys.argv[2], removeHs=False, sanitize=True) if m is not None)
-validate_sdf_round_trip(mol, *_source_heavy_graph(cms, heavy))
+raw_mol = next(m for m in Chem.SDMolSupplier(
+    sys.argv[2], removeHs=False, sanitize=False
+) if m is not None)
+validate_sdf_round_trip(raw_mol, *_source_heavy_graph(cms, heavy))
+mol = Chem.Mol(raw_mol)
+Chem.SanitizeMol(mol)
 print("SDF/CMS graph round-trip: OK")
 PY
 ```

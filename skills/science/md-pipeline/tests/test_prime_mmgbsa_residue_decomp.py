@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import os
 from collections import OrderedDict
 from pathlib import Path
 import sys
@@ -294,6 +295,44 @@ def test_missing_ligand_property_fails_without_replacing_outputs(tmp_path, monke
     manifest = load_json(paths["manifest"])
     assert manifest["status"] == "failed"
     assert manifest["error"]["stage"] == "aggregation"
+
+
+def test_identical_csv_paths_fail_before_schrodinger_io_or_publication(
+    tmp_path, monkeypatch
+):
+    paths = _inputs(tmp_path)
+    paths["summary_csv"] = paths["frame_csv"]
+    monkeypatch.setattr(
+        aggregation_module,
+        "_schrodinger_dependencies",
+        lambda: (_ for _ in ()).throw(AssertionError("Schrodinger I/O must not run")),
+    )
+
+    with pytest.raises(AggregationError, match="distinct files"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    assert not paths["frame_csv"].exists()
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_samefile_csv_targets_fail_without_replacing_existing_output(
+    tmp_path, monkeypatch
+):
+    paths = _inputs(tmp_path)
+    paths["frame_csv"].write_bytes(b"old-output\n")
+    os.link(paths["frame_csv"], paths["summary_csv"])
+    monkeypatch.setattr(
+        aggregation_module,
+        "_schrodinger_dependencies",
+        lambda: (_ for _ in ()).throw(AssertionError("Schrodinger I/O must not run")),
+    )
+
+    with pytest.raises(AggregationError, match="distinct files"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    assert paths["frame_csv"].read_bytes() == b"old-output\n"
+    assert paths["summary_csv"].read_bytes() == b"old-output\n"
+    assert load_json(paths["manifest"])["status"] == "failed"
 
 
 def test_selector_drift_fails_before_writing_outputs(tmp_path, monkeypatch):

@@ -241,7 +241,9 @@ overall_rc=0
 for d in "$@"; do
     ( run_one "$d" )
     rc=$?
-    [ "$rc" -eq 0 ] || overall_rc=$rc
+    if [ "$DECOMP" = 1 ] && [ "$rc" -ne 0 ]; then
+        overall_rc=$rc
+    fi
 done
 echo "########## MMGBSA ALL DONE $(date '+%F %T') ##########"
 exit "$overall_rc"

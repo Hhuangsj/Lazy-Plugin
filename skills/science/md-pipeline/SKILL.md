@@ -55,6 +55,7 @@ ligand ASL，再运行：
 
 ```bash
 # 单个 UNK 肽
+eval "$("$TOOLENV" env synergy-fragment)"
 DECOMP=1 LIG_ASL='res.ptype UNK' $SKILL/scripts/run_mmgbsa.sh DIR
 
 # 已经按 residue 建好的肽；把 ASL 换成该 ligand component
@@ -72,7 +73,8 @@ DECOMP=1 LIG_ASL='chain.name B and not water and not ions' \
 
 single-UNK 路由需要一个只读的 Synergy-Fragment 目录。toolenv 只在该目录同时有
 `peptide_sequence.py` 和 `monomer_library_nonstandard_segments_simple.csv` 时报告它，
-并通过 `SYNERGY_FRAGMENT_DIR` 传递；不把它声明为所有 MM/GBSA 的无条件依赖，也不修改
+`toolenv env synergy-fragment` 会导出 `SYNERGY_FRAGMENT_DIR` 给 runner；不把它声明为所有
+MM/GBSA 的无条件依赖，也不修改
 Synergy。缺少 Synergy 只阻塞 single-UNK；pre-resolved 和普通 MM/GBSA 仍可运行。
 
 结果判断按机器可读产物进行：先读

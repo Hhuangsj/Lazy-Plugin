@@ -14,12 +14,26 @@ from rdkit import Chem
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "skills/science/md-pipeline/scripts/synergy_residue_adapter.py"
-SYNERGY_DIR = Path(
-    os.environ.get(
-        "SYNERGY_FRAGMENT_DIR",
-        "/home/huangshengjie/workstations/Synergy/Synergy-Fragment",
-    )
+SYNERGY_DIR = (
+    Path(os.environ["SYNERGY_FRAGMENT_DIR"]).resolve()
+    if os.environ.get("SYNERGY_FRAGMENT_DIR")
+    else None
 )
+
+
+def _require_synergy_dir():
+    if SYNERGY_DIR is None:
+        pytest.skip(
+            "Synergy integration requires explicit SYNERGY_FRAGMENT_DIR "
+            "(for example: eval \"$(toolenv env synergy-fragment)\")"
+        )
+    required = (
+        SYNERGY_DIR / "peptide_sequence.py",
+        SYNERGY_DIR / "monomer_library_nonstandard_segments_simple.csv",
+    )
+    if not all(path.is_file() for path in required):
+        pytest.skip("SYNERGY_FRAGMENT_DIR does not contain required read-only APIs")
+    return SYNERGY_DIR
 
 
 def _adapter_module():
@@ -47,6 +61,7 @@ def _write_sdf(path, smiles, add_disulfide=False):
 
 
 def _run_adapter(sdf_path, output_path, library_path=None):
+    synergy_dir = _require_synergy_dir()
     command = [
         sys.executable,
         str(SCRIPT),
@@ -55,7 +70,7 @@ def _run_adapter(sdf_path, output_path, library_path=None):
         "--output",
         str(output_path),
         "--synergy-dir",
-        str(SYNERGY_DIR),
+        str(synergy_dir),
     ]
     if library_path is not None:
         command.extend(["--library", str(library_path)])
@@ -296,7 +311,8 @@ def test_non_disulfide_crosslink_build_mapping_is_strict_and_complete(tmp_path):
 def test_non_disulfide_crosslink_build_mapping_rejects_status_drift(monkeypatch):
     """Dropping the full-pipeline crosslinked status check must fail."""
     adapter = _adapter_module()
-    loaded = adapter._load_synergy(SYNERGY_DIR)
+    synergy_dir = _require_synergy_dir()
+    loaded = adapter._load_synergy(synergy_dir)
     real_sequence_peptide = loaded[5]
 
     def sequence_with_status_drift(smiles, identifier):
@@ -312,7 +328,7 @@ def test_non_disulfide_crosslink_build_mapping_rejects_status_drift(monkeypatch)
     )
 
     with pytest.raises(adapter.AdapterError, match="recognition"):
-        adapter.build_mapping(Chem.MolFromSmiles(SIDECHAIN_LACTAM), SYNERGY_DIR)
+        adapter.build_mapping(Chem.MolFromSmiles(SIDECHAIN_LACTAM), synergy_dir)
 
 
 def _roundtrip_recognition_inputs(roundtrip_fragments):
