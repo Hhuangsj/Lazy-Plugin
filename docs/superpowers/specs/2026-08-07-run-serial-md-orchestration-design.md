@@ -90,7 +90,9 @@ Add a shell contract suite with isolated fake AutoMD, GPU, and analysis executab
 6. analysis receives the generated absolute MD directory, raw trajectory source, configurable ASLs, and `ANALYSIS_FRAMES`, while AutoMD retains numeric `FRAMES`;
 7. analysis failure is recorded as failure rather than completion;
 8. missing option values return 2;
-9. the serial runner contains no duplicate AutoTRJ/event-analysis implementation or obsolete `/data1` runtime path.
+9. runtime behavior no longer depends on duplicate AutoTRJ/event-analysis shell commands or an obsolete `/data1` runtime path.
+
+The final diff audit, rather than a brittle source-text unit test, confirms removal of the obsolete implementation symbols and paths.
 
 After the focused suite passes, run Bash syntax checks, every MD-pipeline shell suite, ordinary Python tests, Schrödinger Python tests, toolenv tests, plugin validation, and `git diff --check`.
 

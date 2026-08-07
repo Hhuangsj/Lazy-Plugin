@@ -206,9 +206,9 @@ run_or_print "${analysis_command[@]}"
 
 Remove the hardcoded `/data1/.../miniforge3` `LD_LIBRARY_PATH` export and the direct hardcoded Schrödinger fallback. `env.sh` and the delegated runner own environment activation.
 
-- [ ] **Step 7: Add analysis-failure and static-authority tests**
+- [ ] **Step 7: Add the analysis-failure test and perform a static authority audit**
 
-Make fake analysis exit 37, then assert serial status 1, `sample.mae` in the failed list, and absence from the completed list. Also assert the production file contains `run_analysis.sh`/`ANALYSIS_RUNNER` but no `AUTOTRJ_SHELL_CMD`, `event_analysis.py`, `bash -lc`, or `/data1/`.
+Make fake analysis exit 37, then assert serial status 1, `sample.mae` in the failed list, and absence from the completed list. Separately inspect the production diff with `rg`; confirm it uses `ANALYSIS_RUNNER` and contains no `AUTOTRJ_SHELL_CMD`, direct `event_analysis.py`, `bash -lc`, or `/data1/`. Do not encode this source-text inspection as a behavior test.
 
 - [ ] **Step 8: Run the serial suite GREEN**
 
