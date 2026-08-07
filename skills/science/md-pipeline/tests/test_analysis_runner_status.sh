@@ -188,6 +188,19 @@ test_analysis_eaf_simulation_failure_propagates() {
     assert_analysis_generation_failure simulation 34
 }
 
+test_analysis_missing_generated_eaf_remains_warning_only() {
+    install_fake_environment
+    local first second
+    first=$(make_md_directory_at "$SANDBOX/success-first")
+    second=$(make_md_directory_at "$SANDBOX/success-second")
+    rm -f "$first/system-out.eaf" "$second/system-out.eaf"
+
+    assert_status 0 run_analysis_many "$first" "$second" env \
+        FAIL_STAGE=none FAIL_DIRECTORY="$SANDBOX/never" KEEP_CLEAN=1
+
+    assert_contains "$(cat "$SANDBOX/stdout.log")" "WARN: 找不到可用 .eaf"
+}
+
 test_analysis_all_success_returns_zero() {
     install_fake_environment
     local first second
