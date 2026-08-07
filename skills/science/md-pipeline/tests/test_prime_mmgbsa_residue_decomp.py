@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+from collections import OrderedDict
 from pathlib import Path
 import sys
 
@@ -11,6 +12,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from mmgbsa_decomp_contract import DEFAULT_PROPERTIES, initialize_manifest, load_json
+import prime_mmgbsa_residue_decomp as aggregation_module
 from prime_mmgbsa_residue_decomp import AggregationError, aggregate_prime_mmgbsa
 
 
@@ -19,9 +21,23 @@ class _Atom:
         self.property = dict(properties)
 
 
+class _AtomContainer:
+    def __init__(self, atoms):
+        self._atoms = list(atoms)
+
+    def __len__(self):
+        return len(self._atoms)
+
+    def __getitem__(self, atom_index):
+        if atom_index < 1 or atom_index > len(self._atoms):
+            raise IndexError(atom_index)
+        return self._atoms[atom_index - 1]
+
+
 class _Structure:
     def __init__(self, atoms, selections):
-        self.atom = [None] + list(atoms)
+        self.atom = _AtomContainer(atoms)
+        self.atom_total = len(atoms)
         self.selections = dict(selections)
 
 
@@ -50,7 +66,9 @@ def _residue_map(groups, ligand_asl="ligand"):
 def _group(group_id, group_name, resnum, pdbres):
     return {
         "group_id": group_id,
+        "group_type": "residue",
         "group_name": group_name,
+        "maestro_atom_indices": [resnum],
         "selector": _selector(resnum, pdbres),
     }
 
@@ -133,6 +151,44 @@ def _run(paths, **kwargs):
         manifest_path=paths["manifest"],
         **options
     )
+
+
+def _valid_structure(property_name=DEFAULT_PROPERTIES["dG_Bind"]):
+    return _structure([{property_name: 1.0}, {property_name: 3.0}])
+
+
+def _install_valid_snapshot(monkeypatch, paths, trajectory=None):
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_valid_structure()],
+        trajectory or [_Frame(0.0)],
+    )
+
+
+def _write_existing_outputs(paths):
+    paths["frame_csv"].write_bytes(b"old-frame\n")
+    paths["summary_csv"].write_bytes(b"old-summary\n")
+
+
+def _assert_no_publication_artifacts(tmp_path):
+    assert not [path for path in tmp_path.iterdir() if path.suffix in {".tmp", ".bak"}]
+
+
+def test_real_schrodinger_atom_container_accepts_final_one_based_atom():
+    from schrodinger import structure
+    from schrodinger.structutils import analyze
+
+    real_structure = structure.create_new_structure()
+    real_structure.addAtom("C", 0.0, 0.0, 0.0)
+    real_structure.addAtom("N", 1.0, 0.0, 0.0)
+
+    assert real_structure.atom_total == 2
+    assert len(real_structure.atom) == 2
+    assert real_structure.atom[2].element == "N"
+    assert aggregation_module._select_atoms(
+        analyze, real_structure, "atom.ele N", "final nitrogen"
+    ) == {2}
 
 
 def test_aggregates_only_ligand_atoms_and_marks_manifest_success(tmp_path, monkeypatch):
@@ -316,3 +372,348 @@ def test_unexpected_schrodinger_error_marks_running_manifest_failed(tmp_path, mo
     assert not paths["frame_csv"].exists()
     assert not paths["summary_csv"].exists()
     assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_selector_overlap_fails_before_property_access(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    property_name = DEFAULT_PROPERTIES["dG_Bind"]
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_structure(
+            [{property_name: 1.0}, {property_name: 3.0}],
+            group_one=(1,),
+            group_two=(1, 2),
+        )],
+        [_Frame(0.0)],
+    )
+
+    with pytest.raises(AggregationError, match="overlap"):
+        _run(paths, end=0, properties={"dG_Bind": property_name})
+
+    assert not paths["frame_csv"].exists()
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+@pytest.mark.parametrize(("bad_properties", "reason"), [
+    ({}, "missing"),
+    ({DEFAULT_PROPERTIES["dG_Bind"]: "not-a-number"}, "not numeric"),
+    ({DEFAULT_PROPERTIES["dG_Bind"]: float("nan")}, "not finite"),
+])
+def test_property_error_identifies_frame_group_label_and_prime_property(
+    tmp_path, monkeypatch, bad_properties, reason
+):
+    paths = _inputs(tmp_path)
+    property_name = DEFAULT_PROPERTIES["dG_Bind"]
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_structure([{property_name: 1.0}, bad_properties])],
+        [_Frame(0.0), _Frame(1.0), _Frame(2.0), _Frame(3.0)],
+    )
+
+    with pytest.raises(
+        AggregationError,
+        match=(
+            "source frame 3.*group_id P001.*label dG_Bind.*"
+            "Prime property {}.*{}".format(property_name, reason)
+        ),
+    ):
+        _run(paths, start=3, end=3, properties={"dG_Bind": property_name})
+
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_default_properties_keep_shared_order(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    values = {property_name: float(position) for position, property_name in enumerate(
+        DEFAULT_PROPERTIES.values(), start=1
+    )}
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_structure([values, values])],
+        [_Frame(0.0)],
+    )
+
+    _run(paths, end=0)
+
+    with paths["frame_csv"].open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["property"] for row in rows[:len(DEFAULT_PROPERTIES)]] == list(
+        DEFAULT_PROPERTIES
+    )
+
+
+def test_custom_property_subset_keeps_shared_order(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    properties = OrderedDict([
+        ("Coulomb", DEFAULT_PROPERTIES["Coulomb"]),
+        ("vdW", DEFAULT_PROPERTIES["vdW"]),
+    ])
+    values = {property_name: 1.0 for property_name in properties.values()}
+    _install_schrodinger_fakes(
+        monkeypatch, aggregation_module, [_structure([values, values])], [_Frame(0.0)]
+    )
+
+    _run(paths, end=0, properties=properties)
+
+    with paths["frame_csv"].open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["property"] for row in rows[:2]] == ["Coulomb", "vdW"]
+
+
+@pytest.mark.parametrize("properties", [
+    OrderedDict([("dG_Bind", "not-the-shared-property")]),
+    OrderedDict([("unknown", "r_unknown")]),
+    OrderedDict([
+        ("Coulomb", DEFAULT_PROPERTIES["Coulomb"]),
+        ("dG_Bind", DEFAULT_PROPERTIES["dG_Bind"]),
+    ]),
+])
+def test_public_property_mapping_rejects_noncanonical_requests(
+    tmp_path, monkeypatch, properties
+):
+    paths = _inputs(tmp_path)
+
+    with pytest.raises(AggregationError, match="properties|property"):
+        _run(paths, end=0, properties=properties)
+
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda payload: payload.update(schema_version=2),
+    lambda payload: payload.update(schema_version=True),
+    lambda payload: payload.pop("analysis_ligand_asl"),
+    lambda payload: payload.update(groups="not-a-list"),
+    lambda payload: payload["groups"][0].pop("group_type"),
+    lambda payload: payload["groups"][0].update(group_type="not-a-group-type"),
+    lambda payload: payload["groups"][0].update(maestro_atom_indices=[0]),
+    lambda payload: payload["groups"][0].pop("selector"),
+    lambda payload: payload["groups"][0]["selector"].update(extra="not-allowed"),
+])
+def test_residue_map_schema_is_validated_before_schrodinger_io(
+    tmp_path, monkeypatch, mutation
+):
+    paths = _inputs(tmp_path)
+    payload = json.loads(paths["residue_map"].read_text(encoding="utf-8"))
+    mutation(payload)
+    paths["residue_map"].write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        aggregation_module,
+        "_schrodinger_dependencies",
+        lambda: (_ for _ in ()).throw(AssertionError("Schrodinger I/O reached")),
+    )
+
+    with pytest.raises(AggregationError, match="residue map|group|selector|schema"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+@pytest.mark.parametrize("range_args", [
+    {"start": -1, "end": 0, "step": 1},
+    {"start": 1, "end": 0, "step": 1},
+    {"start": 0, "end": 0, "step": 0},
+    {"start": 0, "end": 0, "step": -1},
+])
+def test_invalid_inclusive_frame_ranges_fail_closed(tmp_path, range_args):
+    paths = _inputs(tmp_path)
+
+    with pytest.raises(AggregationError, match="frame range"):
+        _run(paths, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]}, **range_args)
+
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_nonzero_source_indices_map_to_their_trajectory_times(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    property_name = DEFAULT_PROPERTIES["dG_Bind"]
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_valid_structure(property_name), _valid_structure(property_name)],
+        [_Frame(0.0), _Frame(5.0), _Frame(10.0), _Frame(15.0), _Frame(20.0)],
+    )
+
+    _run(paths, start=2, end=4, step=2, properties={"dG_Bind": property_name})
+
+    with paths["frame_csv"].open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(row["frame"], row["time_ps"]) for row in rows] == [
+        ("2", "10.0"),
+        ("2", "10.0"),
+        ("4", "20.0"),
+        ("4", "20.0"),
+    ]
+
+
+def test_adversarial_fsum_reconciliation_fails_closed(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    property_name = DEFAULT_PROPERTIES["dG_Bind"]
+    groups = [
+        _group("P000", "ALA", 1, "ALA"),
+        _group("P001", "GLY", 2, "GLY"),
+    ]
+    paths["residue_map"].write_text(
+        json.dumps(_residue_map(groups, ligand_asl="ligand")), encoding="utf-8"
+    )
+    structure = _Structure(
+        [_Atom({property_name: 1e16}), _Atom({property_name: -1e16}), _Atom({property_name: 1.0})],
+        {"ligand": (1, 2, 3), 1: (1, 3), 2: (2,)},
+    )
+    _install_schrodinger_fakes(
+        monkeypatch, aggregation_module, [structure], [_Frame(0.0)]
+    )
+
+    with pytest.raises(AggregationError, match="does not reconcile"):
+        _run(paths, end=0, properties={"dG_Bind": property_name})
+
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_second_csv_replacement_rolls_back_pair(
+    tmp_path, monkeypatch, preexisting
+):
+    paths = _inputs(tmp_path)
+    if preexisting:
+        _write_existing_outputs(paths)
+    _install_valid_snapshot(monkeypatch, paths)
+    original_replace = aggregation_module.os.replace
+
+    def fail_summary_replace(source, destination):
+        if (
+            Path(destination) == paths["summary_csv"]
+            and Path(source).name.startswith(".summary.csv.")
+            and Path(source).suffix == ".tmp"
+        ):
+            raise OSError("injected second replacement failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(aggregation_module.os, "replace", fail_summary_replace)
+
+    with pytest.raises(AggregationError, match="second replacement"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    if preexisting:
+        assert paths["frame_csv"].read_bytes() == b"old-frame\n"
+        assert paths["summary_csv"].read_bytes() == b"old-summary\n"
+    else:
+        assert not paths["frame_csv"].exists()
+        assert not paths["summary_csv"].exists()
+    _assert_no_publication_artifacts(tmp_path)
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_success_manifest_failure_restores_preexisting_pair(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    _write_existing_outputs(paths)
+    _install_valid_snapshot(monkeypatch, paths)
+    original_update_manifest = aggregation_module.update_manifest
+
+    def fail_success_manifest(manifest_path, status, **kwargs):
+        if status == "success":
+            raise RuntimeError("injected success manifest failure")
+        return original_update_manifest(manifest_path, status, **kwargs)
+
+    monkeypatch.setattr(aggregation_module, "update_manifest", fail_success_manifest)
+
+    with pytest.raises(AggregationError, match="success manifest failure"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    assert paths["frame_csv"].read_bytes() == b"old-frame\n"
+    assert paths["summary_csv"].read_bytes() == b"old-summary\n"
+    _assert_no_publication_artifacts(tmp_path)
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_success_manifest_failure_removes_new_pair(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    _install_valid_snapshot(monkeypatch, paths)
+    original_update_manifest = aggregation_module.update_manifest
+
+    def fail_success_manifest(manifest_path, status, **kwargs):
+        if status == "success":
+            raise RuntimeError("injected success manifest failure")
+        return original_update_manifest(manifest_path, status, **kwargs)
+
+    monkeypatch.setattr(aggregation_module, "update_manifest", fail_success_manifest)
+
+    with pytest.raises(AggregationError, match="success manifest failure"):
+        _run(paths, end=0, properties={"dG_Bind": DEFAULT_PROPERTIES["dG_Bind"]})
+
+    assert not paths["frame_csv"].exists()
+    assert not paths["summary_csv"].exists()
+    _assert_no_publication_artifacts(tmp_path)
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+@pytest.mark.parametrize("property_argument", [
+    "dG_Bind,dG_Bind",
+    "not-a-property",
+    "Coulomb,dG_Bind",
+    "dG_Bind,",
+    ",dG_Bind",
+    "dG_Bind,,Coulomb",
+    "",
+])
+def test_cli_invalid_property_list_fails_existing_running_manifest(
+    tmp_path, property_argument
+):
+    paths = _inputs(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        aggregation_module.main([
+            "--prime-maegz", str(paths["prime"]),
+            "--residue-map", str(paths["residue_map"]),
+            "--trajectory", str(paths["trajectory"]),
+            "--start", "0",
+            "--end", "0",
+            "--step", "1",
+            "--frame-csv", str(paths["frame_csv"]),
+            "--summary-csv", str(paths["summary_csv"]),
+            "--manifest", str(paths["manifest"]),
+            "--properties", property_argument,
+        ])
+
+    assert exit_info.value.code == 2
+    assert load_json(paths["manifest"])["status"] == "failed"
+
+
+def test_manifest_failure_transition_error_preserves_original_error(tmp_path, monkeypatch):
+    paths = _inputs(tmp_path)
+    property_name = DEFAULT_PROPERTIES["dG_Bind"]
+    _install_schrodinger_fakes(
+        monkeypatch,
+        aggregation_module,
+        [_structure([{property_name: 1.0}, {}])],
+        [_Frame(0.0)],
+    )
+    original_update_manifest = aggregation_module.update_manifest
+
+    def fail_failed_transition(manifest_path, status, **kwargs):
+        if status == "failed":
+            raise RuntimeError("injected failed transition failure")
+        return original_update_manifest(manifest_path, status, **kwargs)
+
+    monkeypatch.setattr(aggregation_module, "update_manifest", fail_failed_transition)
+
+    with pytest.raises(
+        AggregationError,
+        match="missing property.*manifest failure transition issue.*failed transition",
+    ):
+        _run(paths, end=0, properties={"dG_Bind": property_name})
+
+    assert load_json(paths["manifest"])["status"] == "running"
+
+
+def test_failure_does_not_overwrite_terminal_manifest(tmp_path):
+    paths = _inputs(tmp_path)
+    aggregation_module.update_manifest(paths["manifest"], "success")
+
+    with pytest.raises(AggregationError, match="properties must be a subset"):
+        _run(paths, end=0, properties={"unknown": "r_unknown"})
+
+    assert load_json(paths["manifest"])["status"] == "success"
