@@ -298,18 +298,30 @@ test_default_path_preserves_non_arithmetic_frame_arguments() {
         -start_frame 001 -end_frame 08 -step_size 03 -NJOBS 04 -HOST localhost:04
 }
 
-test_default_path_preserves_legacy_success_status_when_thermal_fails() {
+test_default_path_propagates_thermal_failure_status() {
     install_fake_environment
     local directory
     directory=$(make_md_directory)
 
-    assert_status 0 run_mmgbsa "$directory" env \
+    assert_status 8 run_mmgbsa "$directory" env \
         FAIL_STAGE=thermal START=11 END=22 STEP=3 NJOBS=4
 
     assert_call_kinds thermal
     assert_argv 1 thermal_mmgbsa.py "$directory/complex-out.cms" \
         -lig_asl 'res.ptype UNK' -j complex \
         -start_frame 11 -end_frame 22 -step_size 3 -NJOBS 4 -HOST localhost:4
+}
+
+test_default_mixed_directories_keep_first_failure_and_run_later_directory() {
+    install_fake_environment
+    local failed successful
+    failed=$(make_md_directory_at "$SANDBOX/fail-first")
+    successful=$(make_md_directory_at "$SANDBOX/success-second")
+
+    assert_status 8 run_mmgbsa_many "$failed" "$successful" env \
+        FAIL_STAGE=thermal FAIL_DIRECTORY="$failed"
+
+    assert_kind_count thermal 2
 }
 
 test_decomp_rejects_invalid_frame_ranges_before_external_calls() {

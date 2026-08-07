@@ -83,7 +83,16 @@ run_one() {
     rm -rf "$out/plip_outputs" "$out/frames_pdb"   # 删逐帧中间目录,省空间
     echo "==================== $(date '+%F %T') PLIP DONE $name (rc=$rc) ===================="
     echo
+    return "$rc"
 }
 
-for d in "$@"; do ( run_one "$d" ); done
+overall_rc=0
+for d in "$@"; do
+    ( run_one "$d" )
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$overall_rc" -eq 0 ]; then
+        overall_rc=$rc
+    fi
+done
 echo "########## PLIP ALL DONE $(date '+%F %T') ##########"
+exit "$overall_rc"

@@ -241,7 +241,7 @@ overall_rc=0
 for d in "$@"; do
     ( run_one "$d" )
     rc=$?
-    if [ "$DECOMP" = 1 ] && [ "$rc" -ne 0 ]; then
+    if [ "$rc" -ne 0 ] && [ "$overall_rc" -eq 0 ]; then
         overall_rc=$rc
     fi
 done

@@ -73,7 +73,9 @@ run_one() {
         autotraj_args+=( -C "$CLEAN_ASL" -a )
     fi
     AutoTRJ "${autotraj_args[@]}"
-    echo "[$(date '+%F %T')] <<< AutoTRJ exit=$?"
+    local rc=$?
+    echo "[$(date '+%F %T')] <<< AutoTRJ exit=$rc"
+    [ "$rc" -eq 0 ] || return "$rc"
 
     # eaf(SID 事件分析文件):P8/P9 等体系 MD 阶段已自带算好的 -out.eaf;
     # P7 等没有的,现场三步生成:
@@ -88,8 +90,12 @@ run_one() {
         echo "[$(date '+%F %T')] >>> Align event_analysis: regenerate EAF from $cms"
         "$SCHRODINGER/run" event_analysis.py analyze "$cms" \
             -prot "$RECEPTOR_ASL" -lig "$LIGAND_ASL" -out "$event_prefix"
+        rc=$?
+        [ "$rc" -eq 0 ] || return "$rc"
         "$SCHRODINGER/run" analyze_simulation.py "$cms" "$trj" "$eaf" "./${event_prefix}-in.eaf"
-        echo "[$(date '+%F %T')] <<< Align eaf 生成 exit=$?"
+        rc=$?
+        echo "[$(date '+%F %T')] <<< Align eaf 生成 exit=$rc"
+        [ "$rc" -eq 0 ] || return "$rc"
     else
         eaf="./${base}-out.eaf"
         report_dir="${REPORT_DIR:-analysis}"
@@ -97,14 +103,20 @@ run_one() {
             echo "[$(date '+%F %T')] >>> 无 raw eaf,现场生成(analyze → analyze_simulation → report)"
             "$SCHRODINGER/run" event_analysis.py analyze "$cms" \
                 -prot "$RECEPTOR_ASL" -lig "$LIGAND_ASL" -out "$base"
+            rc=$?
+            [ "$rc" -eq 0 ] || return "$rc"
             "$SCHRODINGER/run" analyze_simulation.py "$cms" "$trj" "$eaf" "./${base}-in.eaf"
-            echo "[$(date '+%F %T')] <<< eaf 生成 exit=$?"
+            rc=$?
+            echo "[$(date '+%F %T')] <<< eaf 生成 exit=$rc"
+            [ "$rc" -eq 0 ] || return "$rc"
         fi
     fi
     if [ -f "$eaf" ]; then
         echo "[$(date '+%F %T')] >>> event_analysis.py report  ($eaf)"
         "$SCHRODINGER/run" event_analysis.py report "$eaf" -data -plots -data_dir "$report_dir"
-        echo "[$(date '+%F %T')] <<< event_analysis exit=$?"
+        rc=$?
+        echo "[$(date '+%F %T')] <<< event_analysis exit=$rc"
+        [ "$rc" -eq 0 ] || return "$rc"
     else
         echo "WARN: 找不到可用 .eaf,跳过交互报告。"
     fi
@@ -128,5 +140,13 @@ run_one() {
 
 # 每个目录放到子shell里跑,隔离 run_one 内的 `cd`,避免处理多个目录时
 # 因工作目录未复位而在第二个目录起报 "目录无效"(相对路径场景踩过的坑)。
-for d in "$@"; do ( run_one "$d" ); done
+overall_rc=0
+for d in "$@"; do
+    ( run_one "$d" )
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$overall_rc" -eq 0 ]; then
+        overall_rc=$rc
+    fi
+done
 echo "########## ALL DONE $(date '+%F %T') ##########"
+exit "$overall_rc"
