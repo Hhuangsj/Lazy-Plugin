@@ -39,6 +39,9 @@ cd <工作目录>                     # 放 .mae 输入 + md_pending_serial.list
 cp $SKILL/scripts/md_pending_serial.list.template md_pending_serial.list
 $SKILL/scripts/run_serial_md.sh --dry-run          # 先干跑看命令
 nohup $SKILL/scripts/run_serial_md.sh > run.log 2>&1 &
+$SKILL/scripts/run_serial_md.sh --gpu 2 --submit-immediately
+ANALYSIS_FRAMES='1:2001:20' LIGAND_ASL='chain.name B' \
+  $SKILL/scripts/run_serial_md.sh --workdir /path/to/md-workdir --gpu 2
 $SKILL/scripts/run_analysis.sh <md-dir>...         # event_analysis + AutoTRJ
 $SKILL/scripts/run_plip.sh    <md-dir>...          # 相互作用占据率
 $SKILL/scripts/run_mmgbsa.sh  <md-dir>...          # 结合自由能
@@ -47,6 +50,13 @@ $SCHRODINGER/run $SKILL/scripts/summarize_analysis.py <md-dir>... --out-csv summ
 
 `run_serial_md.sh` 会把进度写进工作目录的 `md_completed_serial.list` /
 `md_failed_serial.list`,已完成或已有 `*-md` 目录的体系自动跳过,可安全重启。
+默认工作目录是启动脚本时的当前目录；`--workdir` 会同时改变默认 pending/completed/
+failed/log 路径，显式相对清单路径也相对于该工作目录。`--submit-immediately` 只能和
+`--gpu`/`--gpus` 一起使用，只跳过 runner 的 GPU 空闲等待，不保证忙碌 GPU 能接收任务。
+同一工作目录同一时间只允许一个 `run_serial_md.sh` 调度器；第二个进程会立即报错退出，
+避免重复提交同一条 pending 任务。
+MD 完成后的分析统一调用 `run_analysis.sh`；`FRAMES` 控制 AutoMD 输出帧数，
+`ANALYSIS_FRAMES`（默认 `1:2001:20`）控制分析抽帧范围。
 
 ## 可选:ligand MM/GBSA 逐残基分解
 

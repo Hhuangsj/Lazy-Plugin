@@ -32,14 +32,15 @@ The default files are then derived from that final directory:
 - `md_completed_serial.list`
 - `md_failed_serial.list`
 - `run_serial_md.log`
-- `.run_serial_md.lock`
+- `.run_serial_md.lock` (held by the scheduler for the full run; external job descendants do not inherit it, and a concurrent runner fails fast)
+- `.run_serial_md.tasks.lock` (task/status mutex shared by workers in one run)
 - `.run_serial_md.claimed.*`
 
 Explicit absolute `--list`, `--completed`, and `--failed` paths remain absolute. Explicit relative paths resolve against the final working directory, regardless of option order. Missing option values fail with status 2 and an actionable message rather than an unbound-variable error.
 
 ## GPU submission contract
 
-`--submit-immediately` remains valid only with `--gpu` or `--gpus`.
+`--submit-immediately` remains valid only with `--gpu` or `--gpus`. GPU indexes and timing/threshold options are validated as bounded decimal integers before any run-state file is created; `--gpus` also rejects empty entries and normalized duplicates.
 
 - Single explicit GPU: use that GPU directly when either dry-run or immediate submission is enabled; otherwise wait until it is stably free.
 - Multiple explicit GPUs: each worker skips availability waiting when either dry-run or immediate submission is enabled; otherwise each worker waits for its GPU.
@@ -74,8 +75,10 @@ For dry-run, the runner prints the analysis invocation without executing it. An 
 
 - Invalid arguments or incompatible options return 2 before creating run-state files.
 - Missing pending input returns 1.
+- A concurrent runner targeting the same workdir returns 1 before submitting work.
 - AutoMD failure prevents analysis and records the item as failed using existing serial/multi-worker behavior.
 - Analysis failure propagates through `run_md_and_analysis` and records the item as failed.
+- Multi-GPU workers continue claiming later tasks after a failure, but retain a nonzero worker status so the top-level run also returns nonzero.
 - A successful item is recorded only after both AutoMD and analysis succeed.
 
 ## Tests
@@ -90,7 +93,12 @@ Add a shell contract suite with isolated fake AutoMD, GPU, and analysis executab
 6. analysis receives the generated absolute MD directory, raw trajectory source, configurable ASLs, and `ANALYSIS_FRAMES`, while AutoMD retains numeric `FRAMES`;
 7. analysis failure is recorded as failure rather than completion;
 8. missing option values return 2;
-9. runtime behavior no longer depends on duplicate AutoTRJ/event-analysis shell commands or an obsolete `/data1` runtime path.
+9. multi-GPU execution continues later tasks but returns nonzero after any task failure;
+10. two real workers are both joined and any worker failure reaches the parent status;
+11. invalid numeric/GPU values fail before state creation, including duplicate normalized GPU IDs;
+12. a second runner for the same workdir fails before duplicate submission;
+13. an external descendant cannot retain the workdir lock after the scheduler exits;
+14. runtime behavior no longer depends on duplicate AutoTRJ/event-analysis shell commands or an obsolete `/data1` runtime path.
 
 The final diff audit, rather than a brittle source-text unit test, confirms removal of the obsolete implementation symbols and paths.
 

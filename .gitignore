@@ -5,4 +5,5 @@ __pycache__/
 /skills/science/md-pipeline/scripts/md_failed_serial.list
 /skills/science/md-pipeline/scripts/run_serial_md.log
 /skills/science/md-pipeline/scripts/.run_serial_md.lock
+/skills/science/md-pipeline/scripts/.run_serial_md.tasks.lock
 /skills/science/md-pipeline/scripts/.run_serial_md.claimed.*

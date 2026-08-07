@@ -2,10 +2,10 @@
 # @name: run_serial_md
 # @description: 串行跑 Desmond MD:自动找空闲 GPU,逐个提交,跑完自动接分析
 # @requires: schrodinger, automd, conda, conda:md
-# @usage: run_serial_md.sh [--gpu N | --gpus 0,2] [--dry-run] [--list FILE]
+# @usage: run_serial_md.sh [--workdir DIR] [--gpu N | --gpus 0,2] [--submit-immediately] [--dry-run]
 #
 # 用法：
-#   cd /data1/home/huangshengjie/workstations/RecA/PEPX_P8P9
+#   cd /path/to/md-workdir
 #
 #   # 只检查会执行哪些命令，不真正提交 MD 或分析任务。
 #   ./run_serial_md.sh --dry-run
@@ -29,16 +29,18 @@
 
 # 环境隔离：统一从同目录 env.sh 加载 Schrödinger/Desmond/AutoMD 与隔离的 conda 环境，
 # 使脚本在 nohup/cron/任意 shell 下都能稳定运行(必须在 set -e 之前 source)。
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
 
 set -euo pipefail
 
-# 路径参数：默认都放在脚本所在目录，通常不需要改。
-WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PENDING_LIST="${WORKDIR}/md_pending_serial.list"
-COMPLETED_LIST="${WORKDIR}/md_completed_serial.list"
-FAILED_LIST="${WORKDIR}/md_failed_serial.list"
-LOG_FILE="${WORKDIR}/run_serial_md.log"
+# 路径参数先保留原始 CLI 值；解析完全部参数后统一相对最终 WORKDIR 规范化。
+INVOCATION_DIR="$PWD"
+WORKDIR=""
+PENDING_LIST=""
+COMPLETED_LIST=""
+FAILED_LIST=""
+LOG_FILE=""
 
 # 运行模式参数。
 # GPU_ID 为空时自动扫描所有 GPU；设置后只等待并使用指定 GPU，例如 --gpu 2。
@@ -48,6 +50,8 @@ GPU_ID=""
 GPU_IDS=""
 # DRY_RUN=true 时只打印命令，不提交任务、不更新完成/失败清单。
 DRY_RUN=false
+# SUBMIT_IMMEDIATELY=true 时不等待 GPU 空闲，直接向指定 GPU 提交作业。
+SUBMIT_IMMEDIATELY=false
 # 没有找到空闲 GPU 时，等待多少秒后重新扫描。
 SLEEP_SECONDS=600
 
@@ -64,15 +68,16 @@ GPU_CHECK_INTERVAL=100
 # MD 命令模板：-i 输入文件会在运行时插入；其他参数沿用当前项目设置。
 # 模拟时长(-t, ns)与轨迹帧数(-o)可用环境变量覆盖,默认与历史一致(200ns/2000帧)。
 #   MDTIME=500 FRAMES=2000 ./run_serial_md.sh ...   # 500ns、2000帧
-AUTOMD_CMD=(AutoMD -S OUC -P "protein" -L "res.ptype UNK" -F OPLS4 -o "${FRAMES:-2000}" -t "${MDTIME:-200}" -G localhost)
-# 轨迹分析命令模板：通配符必须在 MD 目录里由 shell 展开，所以这里保存成字符串。
-# 注意两处经验修正(见 README「踩坑记录」)：
-#   1) 配体用 -L "res.ptype UNK"(与 AutoMD 建模一致)；默认 "ligand" 对多肽类配体选不到原子。
-#   2) 默认不含 MMGBSA：CLEAN 去水去离子后冻结集为空会报错。要跑请在 -M 末尾加 "+MMGBSA"
-#      并去掉 thermal_mmgbsa 的 -frozen/-atom_asl,或改用独立的 run_analysis.sh。
-AUTOTRJ_SHELL_CMD='AutoTRJ -i *md_trj -J PL_Analysis -M "APCluster_5+LigandAPCluster_5+LigandCHCluster_5_1.0" -L "res.ptype UNK" -t "1:2001:20" -C "not solvent and not ions" -a'
+# 正常残基肽与 UNK 修饰肽的链/残基选择不同，调用方可覆盖；默认保持旧体系兼容。
+# 本机 hosts 文件通常仅有 localhost；远程队列可通过 AUTOMD_{CPU,GPU}_HOST 覆盖。
+AUTOMD_CMD=(AutoMD -S OUC -P "${RECEPTOR_ASL:-protein}" -L "${LIGAND_ASL:-res.ptype UNK}" -F OPLS4 -o "${FRAMES:-2000}" -t "${MDTIME:-200}" -H "${AUTOMD_CPU_HOST:-localhost}" -G "${AUTOMD_GPU_HOST:-localhost}")
+# AutoMD 的 FRAMES 是输出帧数；run_analysis.sh 的 FRAMES 是 start:end:step，边界处显式适配。
+ANALYSIS_FRAMES="${ANALYSIS_FRAMES:-1:2001:20}"
+ANALYSIS_RUNNER="${ANALYSIS_RUNNER:-$SCRIPT_DIR/run_analysis.sh}"
 
-# 多 worker 任务认领用的锁文件。CLAIMED_LIST 会在 main 里创建为本次运行的临时文件。
+# RUN_LOCK_FD 在整次调度期间持有工作目录级锁，防止两个调度器重复提交。
+# LOCK_FILE 只用于同一调度器内多 worker 的任务认领/状态更新互斥。
+RUN_LOCK_FD=""
 LOCK_FILE=""
 CLAIMED_LIST=""
 
@@ -81,12 +86,14 @@ usage() {
 Usage: ./run_serial_md.sh [options]
 
 Options:
-  --workdir DIR       .mae 文件所在目录。默认：脚本所在目录。
+  --workdir DIR       .mae 文件所在目录。默认：启动命令时的当前目录。
   --list FILE         待运行清单。默认：md_pending_serial.list。
   --completed FILE    已完成记录文件。默认：md_completed_serial.list。
   --failed FILE       失败记录文件。默认：md_failed_serial.list。
   --gpu INDEX         只使用指定 GPU；提交前仍会检查这张卡是否真的空闲。
   --gpus LIST         多 GPU 并行模式，例如 0,2；每张 GPU 一个 worker，各自串行运行。
+  --submit-immediately
+                      不等待 GPU 空闲，立即向 --gpu/--gpus 指定的 GPU 提交作业。
   --dry-run           只打印命令，不真正运行 MD/分析，也不更新完成/失败记录。
   --sleep SECONDS     没有空闲 GPU 时的轮询间隔。默认：600。
   --gpu-stable-checks N
@@ -96,6 +103,8 @@ Options:
   --max-free-util N   GPU 利用率必须 <= N%。默认：5。
   --max-free-mem-mb N GPU 显存占用必须 <= N MiB。默认：100。
   -h, --help          显示帮助。
+
+相对 --list/--completed/--failed 路径均相对于最终工作目录解析。
 EOF
 }
 
@@ -166,7 +175,14 @@ gpu_free_sample() {
   util="$(awk -F, '{gsub(/^ +| +$/, "", $1); print $1}' <<< "${stats}")"
   mem="$(awk -F, '{gsub(/^ +| +$/, "", $2); print $2}' <<< "${stats}")"
 
-  if [[ "${util}" -le "${MAX_FREE_UTIL}" && "${mem}" -le "${MAX_FREE_MEM_MB}" ]]; then
+  case "${util}" in
+    ''|*[!0-9]*) log "GPU ${index} returned invalid utilization: ${util}."; return 1 ;;
+  esac
+  case "${mem}" in
+    ''|*[!0-9]*) log "GPU ${index} returned invalid memory usage: ${mem}."; return 1 ;;
+  esac
+
+  if ((10#${util} <= MAX_FREE_UTIL && 10#${mem} <= MAX_FREE_MEM_MB)); then
     log "GPU ${index} stable free check ${check_number}/${GPU_STABLE_CHECKS}: util=${util}%, mem=${mem}MiB."
     return 0
   fi
@@ -249,17 +265,111 @@ run_or_print() {
   if [[ "${DRY_RUN}" == true ]]; then
     quote_cmd "$@"
   else
-    "$@"
+    # 外部 job launcher 可能留下后台后代；不允许它们继承工作目录级锁。
+    "$@" {RUN_LOCK_FD}>&-
   fi
 }
 
-run_shell_or_print() {
-  local cmd="$1"
-  if [[ "${DRY_RUN}" == true ]]; then
-    echo "${cmd}"
-  else
-    bash -lc "${cmd}"
+require_option_value() {
+  if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+    echo "Option $1 requires a value." >&2
+    return 2
   fi
+}
+
+validate_decimal_range() {
+  local option="$1" value="$2" minimum="$3" maximum="$4"
+  local normalized="${value}"
+
+  case "${normalized}" in
+    ''|*[!0-9]*)
+      echo "${option} must be a decimal integer in ${minimum}..${maximum}." >&2
+      return 2
+      ;;
+  esac
+  while [[ "${#normalized}" -gt 1 && "${normalized#0}" != "${normalized}" ]]; do
+    normalized=${normalized#0}
+  done
+  if [[ "${#normalized}" -gt 10 ]] \
+      || ((10#${normalized} < minimum || 10#${normalized} > maximum)); then
+    echo "${option} must be a decimal integer in ${minimum}..${maximum}." >&2
+    return 2
+  fi
+  VALIDATED_DECIMAL=${normalized}
+}
+
+validate_numeric_options() {
+  validate_decimal_range --sleep "${SLEEP_SECONDS}" 1 86400 || return $?
+  SLEEP_SECONDS=${VALIDATED_DECIMAL}
+  validate_decimal_range --gpu-stable-checks "${GPU_STABLE_CHECKS}" 1 100 || return $?
+  GPU_STABLE_CHECKS=${VALIDATED_DECIMAL}
+  validate_decimal_range --gpu-check-interval "${GPU_CHECK_INTERVAL}" 0 86400 || return $?
+  GPU_CHECK_INTERVAL=${VALIDATED_DECIMAL}
+  validate_decimal_range --max-free-util "${MAX_FREE_UTIL}" 0 100 || return $?
+  MAX_FREE_UTIL=${VALIDATED_DECIMAL}
+  validate_decimal_range --max-free-mem-mb "${MAX_FREE_MEM_MB}" 0 1000000000 || return $?
+  MAX_FREE_MEM_MB=${VALIDATED_DECIMAL}
+}
+
+validate_gpu_options() {
+  local raw_gpu gpu normalized_list=""
+  local -a raw_gpus=()
+  local -A seen_gpus=()
+
+  if [[ -n "${GPU_ID}" ]]; then
+    validate_decimal_range --gpu "${GPU_ID}" 0 1024 || return $?
+    GPU_ID=${VALIDATED_DECIMAL}
+  fi
+
+  if [[ -n "${GPU_IDS}" ]]; then
+    case "${GPU_IDS}" in
+      ,*|*,|*,,*)
+        echo "--gpus must be a non-empty, duplicate-free list of GPU indexes in 0..1024." >&2
+        return 2
+        ;;
+    esac
+    IFS=',' read -ra raw_gpus <<< "${GPU_IDS}"
+    for raw_gpu in "${raw_gpus[@]}"; do
+      gpu="${raw_gpu#"${raw_gpu%%[![:space:]]*}"}"
+      gpu="${gpu%"${gpu##*[![:space:]]}"}"
+      validate_decimal_range --gpus "${gpu}" 0 1024 || return $?
+      gpu=${VALIDATED_DECIMAL}
+      if [[ -n "${seen_gpus[$gpu]+set}" ]]; then
+        echo "--gpus contains duplicate GPU index: ${gpu}." >&2
+        return 2
+      fi
+      seen_gpus[$gpu]=1
+      if [[ -n "${normalized_list}" ]]; then
+        normalized_list+=","
+      fi
+      normalized_list+="${gpu}"
+    done
+    GPU_IDS=${normalized_list}
+  fi
+}
+
+resolve_run_paths() {
+  local requested_workdir="${WORKDIR:-$INVOCATION_DIR}"
+  local variable value
+
+  WORKDIR="$(cd "${requested_workdir}" 2>/dev/null && pwd)" || {
+    echo "Workdir not found: ${requested_workdir}" >&2
+    return 2
+  }
+
+  for variable in PENDING_LIST COMPLETED_LIST FAILED_LIST; do
+    value="${!variable}"
+    if [[ -z "${value}" ]]; then
+      case "${variable}" in
+        PENDING_LIST) value="md_pending_serial.list" ;;
+        COMPLETED_LIST) value="md_completed_serial.list" ;;
+        FAILED_LIST) value="md_failed_serial.list" ;;
+      esac
+    fi
+    [[ "${value}" == /* ]] || value="${WORKDIR}/${value}"
+    printf -v "${variable}" '%s' "${value}"
+  done
+  LOG_FILE="${WORKDIR}/run_serial_md.log"
 }
 
 record_status() {
@@ -323,13 +433,16 @@ claim_next_task() {
 worker_loop() {
   local gpu="$1"
   local mae
+  local rc overall_rc=0
 
   log "Starting worker for GPU ${gpu}."
   while mae="$(claim_next_task "${gpu}")"; do
     [[ -n "${mae}" ]] || break
 
-    if [[ "${DRY_RUN}" == true ]]; then
-      wait_for_gpu "${gpu}" > /dev/null
+    if [[ "${SUBMIT_IMMEDIATELY}" == true ]]; then
+      log "Worker GPU ${gpu}: submitting without waiting for GPU availability."
+    elif [[ "${DRY_RUN}" == true ]]; then
+      log "Worker GPU ${gpu}: dry-run skips GPU availability waiting."
     else
       wait_for_gpu "${gpu}" > /dev/null
     fi
@@ -338,11 +451,16 @@ worker_loop() {
       record_status "${COMPLETED_LIST}" "${mae}"
       log "Worker GPU ${gpu}: completed ${mae}."
     else
+      rc=$?
+      if [[ "${overall_rc}" -eq 0 ]]; then
+        overall_rc=${rc}
+      fi
       record_status "${FAILED_LIST}" "${mae}"
       log "Worker GPU ${gpu}: FAILED ${mae}; continuing with remaining tasks."
     fi
   done
   log "Worker for GPU ${gpu} has no more tasks."
+  return "${overall_rc}"
 }
 
 run_multi_gpu_workers() {
@@ -376,12 +494,19 @@ run_md_and_analysis() {
   local mae="$1"
   local gpu="$2"
   local md_dir
+  local rc
+  local -a analysis_command
 
   log "Starting ${mae} on GPU ${gpu}."
-  export LD_LIBRARY_PATH="/data1/home/huangshengjie/miniforge3/envs/md/lib:${LD_LIBRARY_PATH:-}"
 
   cd "${WORKDIR}"
-  run_or_print env CUDA_VISIBLE_DEVICES="${gpu}" "${AUTOMD_CMD[@]:0:1}" -i "${mae}" "${AUTOMD_CMD[@]:1}"
+  run_or_print env CUDA_VISIBLE_DEVICES="${gpu}" \
+    "${AUTOMD_CMD[@]:0:1}" -i "${mae}" "${AUTOMD_CMD[@]:1}"
+  rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    log "ERROR: AutoMD failed for ${mae} with status ${rc}."
+    return "${rc}"
+  fi
 
   md_dir="$(latest_md_dir_for "${mae}")"
   if [[ "${DRY_RUN}" == true && -z "${md_dir}" ]]; then
@@ -393,37 +518,43 @@ run_md_and_analysis() {
   }
 
   log "Running analysis in ${md_dir}."
-  cd "${md_dir}" 2>/dev/null || {
-    [[ "${DRY_RUN}" == true ]] || return 1
-  }
-  run_shell_or_print "${AUTOTRJ_SHELL_CMD}"
-  run_shell_or_print "\"${SCHRODINGER:-/data1/home/huangshengjie/software/Schrodinger/2023-4}/run\" event_analysis.py report *.eaf -data -plots -data_dir analysis"
+  analysis_command=(
+    env TRAJECTORY_SOURCE=raw FRAMES="${ANALYSIS_FRAMES}"
+    "${ANALYSIS_RUNNER}" "${md_dir}"
+  )
+  run_or_print "${analysis_command[@]}"
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --workdir)
-        WORKDIR="$(cd "$2" && pwd)"
+        require_option_value "$@" || return $?
+        WORKDIR="$2"
         shift 2
         ;;
       --list)
+        require_option_value "$@" || return $?
         PENDING_LIST="$2"
         shift 2
         ;;
       --completed)
+        require_option_value "$@" || return $?
         COMPLETED_LIST="$2"
         shift 2
         ;;
       --failed)
+        require_option_value "$@" || return $?
         FAILED_LIST="$2"
         shift 2
         ;;
       --gpu)
+        require_option_value "$@" || return $?
         GPU_ID="$2"
         shift 2
         ;;
       --gpus)
+        require_option_value "$@" || return $?
         GPU_IDS="$2"
         shift 2
         ;;
@@ -431,23 +562,32 @@ parse_args() {
         DRY_RUN=true
         shift
         ;;
+      --submit-immediately)
+        SUBMIT_IMMEDIATELY=true
+        shift
+        ;;
       --sleep)
+        require_option_value "$@" || return $?
         SLEEP_SECONDS="$2"
         shift 2
         ;;
       --gpu-stable-checks)
+        require_option_value "$@" || return $?
         GPU_STABLE_CHECKS="$2"
         shift 2
         ;;
       --gpu-check-interval)
+        require_option_value "$@" || return $?
         GPU_CHECK_INTERVAL="$2"
         shift 2
         ;;
       --max-free-util)
+        require_option_value "$@" || return $?
         MAX_FREE_UTIL="$2"
         shift 2
         ;;
       --max-free-mem-mb)
+        require_option_value "$@" || return $?
         MAX_FREE_MEM_MB="$2"
         shift 2
         ;;
@@ -466,8 +606,15 @@ parse_args() {
 
 main() {
   parse_args "$@"
+  resolve_run_paths
+  validate_numeric_options
+  validate_gpu_options
   if [[ -n "${GPU_ID}" && -n "${GPU_IDS}" ]]; then
     echo "Use either --gpu or --gpus, not both." >&2
+    exit 2
+  fi
+  if [[ "${SUBMIT_IMMEDIATELY}" == true && -z "${GPU_ID}" && -z "${GPU_IDS}" ]]; then
+    echo "--submit-immediately requires --gpu or --gpus." >&2
     exit 2
   fi
 
@@ -476,9 +623,15 @@ main() {
     exit 1
   }
 
+  exec {RUN_LOCK_FD}> "${WORKDIR}/.run_serial_md.lock"
+  if ! flock -n "${RUN_LOCK_FD}"; then
+    echo "Another run_serial_md.sh is already running for ${WORKDIR}." >&2
+    exit 1
+  fi
+
   mkdir -p "$(dirname "${COMPLETED_LIST}")" "$(dirname "${FAILED_LIST}")" "$(dirname "${LOG_FILE}")"
   touch "${COMPLETED_LIST}" "${FAILED_LIST}" "${LOG_FILE}"
-  LOCK_FILE="${WORKDIR}/.run_serial_md.lock"
+  LOCK_FILE="${WORKDIR}/.run_serial_md.tasks.lock"
   CLAIMED_LIST="$(mktemp "${WORKDIR}/.run_serial_md.claimed.XXXXXX")"
   trap 'rm -f "${CLAIMED_LIST}"' EXIT
 
@@ -507,7 +660,8 @@ main() {
       continue
     fi
 
-    if [[ "${DRY_RUN}" == true && -n "${GPU_ID}" ]]; then
+    if [[ -n "${GPU_ID}" \
+          && ( "${DRY_RUN}" == true || "${SUBMIT_IMMEDIATELY}" == true ) ]]; then
       gpu="${GPU_ID}"
     else
       gpu="$(wait_for_free_gpu)"

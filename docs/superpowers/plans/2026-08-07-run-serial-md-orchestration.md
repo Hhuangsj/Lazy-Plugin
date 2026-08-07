@@ -16,6 +16,8 @@
 - Relative `--list`, `--completed`, and `--failed` paths resolve against the final absolute workdir, independent of option order.
 - `run_analysis.sh` is the only authoritative AutoTRJ/event-analysis implementation.
 - Do not alter the restart rule for an existing matching `*-md` directory.
+- Reject concurrent runners for one workdir with a run-lifetime lock; use a separate worker mutex to avoid self-deadlock.
+- Validate GPU IDs, lists, polling intervals, and thresholds before creating state files.
 - Do not stage generated serial lists/logs or unrelated files.
 
 ---
@@ -215,6 +217,14 @@ Make fake analysis exit 37, then assert serial status 1, `sample.mae` in the fai
 Run `bash skills/science/md-pipeline/tests/test_run_serial_md.sh`.
 
 Expected: all tests pass with zero real jobs and no unexpected warnings.
+
+- [ ] **Step 9: Preserve multi-GPU failure status while continuing tasks**
+
+Add a two-item, one-worker multi-GPU test whose first analysis exits 37 and whose second succeeds. Verify RED because the worker currently ends with the final log command's zero status. Retain the first nonzero task status inside `worker_loop`, continue the claim loop, return that status after all tasks, and verify the test sees both analysis calls plus a nonzero top-level status.
+
+- [ ] **Step 10: Apply review hardening**
+
+Validate every numeric/GPU option before state creation, reject malformed or duplicate `--gpus` values, hold a nonblocking workdir lock for the complete run without leaking it to external job descendants, and keep a separate task/status mutex for workers. Cover a competing second process, post-run lock release with a surviving descendant, relative `--workdir`, and true two-worker parent status aggregation.
 
 ---
 
