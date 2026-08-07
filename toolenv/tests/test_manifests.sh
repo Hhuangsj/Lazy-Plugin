@@ -8,7 +8,33 @@ TOOLENV_HOME=${TOOLENV_HOME:-$(dirname "$TESTS_DIR")}
 . "$TOOLENV_HOME/lib/cache.sh"
 . "$TOOLENV_HOME/lib/resolve.sh"
 
-EXPECTED="ambertools automd conda plip rdkit schrodinger"
+EXPECTED="ambertools automd conda plip rdkit schrodinger synergy-fragment"
+
+test_synergy_manifest_accepts_the_two_read_only_inputs_without_residue_map() {
+    local fragment="$SANDBOX/Synergy-Fragment"
+    mkdir -p "$fragment"
+    : > "$fragment/peptide_sequence.py"
+    : > "$fragment/monomer_library_nonstandard_segments_simple.csv"
+    export SYNERGY_FRAGMENT_DIR="$fragment"
+
+    toolenv_load_manifest synergy-fragment
+    TOOLENV_HIT=""; TOOLENV_HIT_SOURCE=""; TOOLENV_HIT_ENV=""
+    assert_ok tool_detect
+    assert_eq "$TOOLENV_HIT" "$(readlink -f "$fragment")"
+    assert_contains "$(toolenv_activate_lines synergy-fragment "$fragment")" \
+        "export SYNERGY_FRAGMENT_DIR="
+}
+
+test_synergy_manifest_rejects_incomplete_fragment() {
+    local fragment="$SANDBOX/Synergy-Fragment"
+    mkdir -p "$fragment"
+    : > "$fragment/peptide_sequence.py"
+    export SYNERGY_FRAGMENT_DIR="$fragment"
+
+    toolenv_load_manifest synergy-fragment
+    TOOLENV_HIT=""; TOOLENV_HIT_SOURCE=""; TOOLENV_HIT_ENV=""
+    assert_fail tool_detect
+}
 
 test_all_expected_manifests_present() {
     assert_eq "$(toolenv_list_manifests | tr '\n' ' ' | sed 's/ $//')" "$EXPECTED"

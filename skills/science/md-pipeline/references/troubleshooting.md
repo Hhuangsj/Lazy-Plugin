@@ -127,3 +127,216 @@ rm -f <dir>/PL_Analysis_*Cluster_*-out.cms
 bash 是按字节偏移边读边执行的。分析跑到一半时改 `drive.sh`,正在跑的那个进程会从
 错位的偏移继续读,报 `syntax error near unexpected token` 然后死掉 —— 表现为
 「明明语法没问题的脚本却挂了」。要改就先复制一份改副本,或等跑完再改。
+
+## 13. ligand residue decomp:按 manifest 和 summary 诊断
+
+入口仍是 `DECOMP=1 run_mmgbsa.sh`。先设这几个路径；`OUT_NAME` 不同于默认值时，按
+实际输出目录调整：
+
+```bash
+CMS=/path/to/*-out.cms
+LIG_ASL='res.ptype UNK'
+SKILL=/path/to/Lazy-Plugin/skills/science/md-pipeline
+DECOMP_DIR=/path/to/mmgbsa_last100ns/residue_decomp
+MANIFEST="$DECOMP_DIR/decomp_manifest.json"
+RESMAP="$DECOMP_DIR/residue_map.json"
+PRIME=/path/to/mmgbsa_last100ns/*-prime-out.maegz
+```
+
+诊断顺序固定为：先读 `decomp_manifest.json` 的 `status`、`mode`、`coverage`、`error`
+和 `paths`，再读 manifest 指向的 `ligand_decomp_summary.csv`（当前 runner 若写成
+`residue_decomp_summary.csv`，以 `paths.summary_csv` 为准）。unknown 名称只是 warning；
+coverage 不是 100%，或存在 missing/duplicate/overlap，都是失败，不能用 warning 掩盖。
+
+### 13.1 ASL 必须选中一个完整分子
+
+下面的检查会同时报告 ASL 原子数和第一个选中原子的完整 molecule 原子数；两者不等即
+ASL 选中了零个、多个或不完整的分子：
+
+```bash
+$SCHRODINGER/run python3 - "$CMS" "$LIG_ASL" <<'PY'
+import sys
+from schrodinger.application.desmond.packages import topo
+
+_, cms = topo.read_cms(sys.argv[1])
+asl = sys.argv[2]
+selected = sorted(cms.select_atom(asl))
+print("asl:", asl)
+print("selected atoms:", len(selected))
+if not selected:
+    raise SystemExit("FAIL: ASL selected zero atoms")
+molecule = {atom.index for atom in cms.getMoleculeAtoms(cms.atom[selected[0]])}
+print("first molecule atoms:", len(molecule))
+print("complete single molecule:", set(selected) == molecule)
+if set(selected) != molecule:
+    raise SystemExit("FAIL: ASL must select exactly one complete molecule")
+PY
+```
+
+### 13.2 Synergy 缺失只阻塞 single-UNK
+
+先验证发现层和两个只读输入；不需要也不应把别的 Synergy 文件加入 manifest：
+
+```bash
+TOOLENV=/path/to/Lazy-Plugin/toolenv/toolenv
+"$TOOLENV" which synergy-fragment
+FRAGMENT_DIR=/path/to/Synergy-Fragment
+test -f "$FRAGMENT_DIR/peptide_sequence.py" \
+  && test -f "$FRAGMENT_DIR/monomer_library_nonstandard_segments_simple.csv" \
+  && echo 'Synergy-Fragment inputs: OK'
+export SYNERGY_FRAGMENT_DIR="$FRAGMENT_DIR"
+```
+
+若 `mode=single_unk` 且 `which` 失败，修正 `SYNERGY_FRAGMENT_DIR` 或
+`TOOLENV_SYNERGY_FRAGMENT` 后重跑 `DECOMP=1`。pre-resolved 的 `mode` 不应因 Synergy
+缺失而失败；普通 `run_mmgbsa.sh DIR` 也不依赖它。
+
+### 13.3 SDF/CMS graph mismatch
+
+先定位准备阶段的首个错误，再用同一套 round-trip 校验重读导出的 SDF；它比较有序元素、
+形式电荷和归一化键三元组：
+
+```bash
+grep -nEi 'sdf|graph|round.?trip|element|charge|bond|mismatch' \
+  "$DECOMP_DIR/prepare_ligand_decomp.log"
+"$SCHRODINGER/run" python3 - "$CMS" "$DECOMP_DIR/ligand_graph.sdf" \
+  "$DECOMP_DIR/atom_index_map.json" "$SKILL/scripts" <<'PY'
+import json
+import sys
+sys.path.insert(0, sys.argv[4])
+from rdkit import Chem
+from schrodinger.application.desmond.packages import topo
+from prepare_ligand_decomp import _source_heavy_graph, validate_sdf_round_trip
+
+_, cms = topo.read_cms(sys.argv[1])
+with open(sys.argv[3], encoding="utf-8") as handle:
+    heavy = [int(gid) for _, gid in sorted(json.load(handle).items(), key=lambda pair: int(pair[0]))]
+mol = next(m for m in Chem.SDMolSupplier(sys.argv[2], removeHs=False, sanitize=True) if m is not None)
+validate_sdf_round_trip(mol, *_source_heavy_graph(cms, heavy))
+print("SDF/CMS graph round-trip: OK")
+PY
+```
+
+### 13.4 atom ownership: missing、duplicate 或 overlap
+
+`residue_map.json` 的 coverage 和每个 group 的 `maestro_atom_indices` 必须形成精确分区；
+显式氢也必须已经归到唯一的重原子 group：
+
+```bash
+python3 - "$RESMAP" <<'PY'
+import collections
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+coverage = data.get("coverage", {})
+assigned = [atom for group in data.get("groups", [])
+            for atom in group.get("maestro_atom_indices", [])]
+duplicates = sorted(atom for atom, count in collections.Counter(assigned).items() if count > 1)
+print("coverage:", coverage)
+print("assigned:", len(assigned), "unique:", len(set(assigned)))
+print("duplicates:", duplicates)
+if coverage.get("fraction") != 1.0 or coverage.get("unassigned_atom_indices") or duplicates:
+    raise SystemExit("FAIL: ligand atom ownership is not an exact partition")
+PY
+```
+
+### 13.5 Prime property 缺失，尤其是 `Lig_Strain`
+
+默认请求的十个 property 必须存在于每个 Prime snapshot 的每个 ligand atom；不要把缺失
+值当成 0。先列出第一帧的实际覆盖：
+
+```bash
+$SCHRODINGER/run python3 - "$PRIME" <<'PY'
+import sys
+from schrodinger.structure import StructureReader
+
+required = {
+    "dG_Bind": "r_psp_MMGBSA_dG_Bind",
+    "Coulomb": "r_psp_MMGBSA_dG_Bind(NS)_Coulomb",
+    "Solv_GB": "r_psp_MMGBSA_dG_Bind(NS)_Solv_GB",
+    "Covalent": "r_psp_MMGBSA_dG_Bind(NS)_Covalent",
+    "vdW": "r_psp_MMGBSA_dG_Bind(NS)_vdW",
+    "Hbond": "r_psp_MMGBSA_dG_Bind(NS)_Hbond",
+    "Lipo": "r_psp_MMGBSA_dG_Bind(NS)_Lipo",
+    "Packing": "r_psp_MMGBSA_dG_Bind(NS)_Packing",
+    "SelfCont": "r_psp_MMGBSA_dG_Bind(NS)_SelfCont",
+    "Lig_Strain": "r_psp_Lig_Strain_Energy",
+}
+structure = next(iter(StructureReader(sys.argv[1])))
+for label, name in required.items():
+    count = sum(name in atom.property for atom in structure.atom[1:])
+    print("{}: {}/{} atoms".format(label, count, structure.atom_total))
+PY
+```
+
+如果只有 `Lig_Strain` 缺失，确认 Prime 版本/作业类型确实产生
+`r_psp_Lig_Strain_Energy`；除非明确接受改变科学问题，否则不要静默删掉该列。需要
+删减时只能显式设置与结果解释一致的 `DECOMP_PROPERTIES`，并重新检查 manifest。
+
+### 13.6 selector drift
+
+如果日志报 `group selector drift from analysis_ligand_asl`，检查分析 CMS 和 Prime 第一帧
+中每个保存的 selector 是否仍唯一、是否覆盖同一组：
+
+```bash
+$SCHRODINGER/run python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
+import json
+import sys
+sys.path.insert(0, sys.argv[3])
+from schrodinger.structure import StructureReader
+from schrodinger.structutils import analyze
+from prepare_ligand_decomp import _selector_asl
+
+with open(sys.argv[2], encoding="utf-8") as handle:
+    residue_map = json.load(handle)
+structure = next(iter(StructureReader(sys.argv[1])))
+for group in residue_map["groups"]:
+    selected = list(analyze.evaluate_asl(structure, _selector_asl(group["selector"])))
+    print(group["group_id"], group["selector"], "atoms=", len(selected), "ids=", selected)
+    if len(selected) == 0:
+        raise SystemExit("FAIL: selector drift or zero-match group")
+PY
+```
+
+### 13.7 group-sum reconciliation
+
+reconciliation 是 group property 总和与独立 `analysis_ligand_asl` 原子总和的数值校验，
+不是与整个 complex 的 `dG_Bind` 比较。先看失败帧和 property：
+
+```bash
+grep -nEi 'reconcil|group sum|direct sum|source frame|missing property' \
+  "$DECOMP_DIR/prime_mmgbsa_residue_decomp.log"
+```
+
+需要复核数值时，可对第一帧直接重算两边（只读 Prime 和 map，不依赖 summary）：
+
+```bash
+$SCHRODINGER/run python3 - "$PRIME" "$RESMAP" "$SKILL/scripts" <<'PY'
+import json
+import math
+import sys
+sys.path.insert(0, sys.argv[3])
+from prime_mmgbsa_residue_decomp import (
+    _cache_snapshot_properties, _normalise_groups, _normalise_properties,
+    _schrodinger_dependencies, _validate_snapshot_partition,
+)
+
+with open(sys.argv[2], encoding="utf-8") as handle:
+    residue_map = json.load(handle)
+StructureReader, analyze, _ = _schrodinger_dependencies()
+structure = next(iter(StructureReader(sys.argv[1])))
+ligand_asl, groups = _normalise_groups(residue_map)
+ligand_atoms, selections = _validate_snapshot_partition(analyze, structure, groups, ligand_asl)
+properties = _normalise_properties(None)
+atom_values, group_values = _cache_snapshot_properties(structure, selections, properties, 0)
+for label, property_name in properties:
+    direct = math.fsum(atom_values[(atom, label)] for atom in ligand_atoms)
+    grouped = math.fsum(group_values[(group_id, label)] for group_id, _, _ in selections)
+    print(label, property_name, "direct=", direct, "groups=", grouped, "delta=", grouped - direct)
+PY
+```
+
+若 delta 超过 `rel_tol=1e-9` / `abs_tol=1e-6`，先修复 selector/ownership/property 问题，
+再重新运行；不要手工编辑 CSV 或把 group 总和当作整个 complex 的总结合自由能。

@@ -47,6 +47,41 @@ $SCHRODINGER/run $SKILL/scripts/summarize_analysis.py <md-dir>... --out-csv summ
 `run_serial_md.sh` 会把进度写进工作目录的 `md_completed_serial.list` /
 `md_failed_serial.list`,已完成或已有 `*-md` 目录的体系自动跳过,可安全重启。
 
+## 可选:ligand MM/GBSA 逐残基分解
+
+入口仍是 `DECOMP=1` 的 `run_mmgbsa.sh`；它只在显式开启时增加分解准备和汇总，普通
+`run_mmgbsa.sh DIR` 的 thermal MM/GBSA 路径不变。先根据 CMS 中的 residue 形态选
+ligand ASL，再运行：
+
+```bash
+# 单个 UNK 肽
+DECOMP=1 LIG_ASL='res.ptype UNK' $SKILL/scripts/run_mmgbsa.sh DIR
+
+# 已经按 residue 建好的肽；把 ASL 换成该 ligand component
+DECOMP=1 LIG_ASL='chain.name B and not water and not ions' \
+  $SKILL/scripts/run_mmgbsa.sh DIR
+```
+
+路由只有三种：
+
+| ligand 形态 | 命令 | 需要 Synergy | 预期分组 |
+|---|---|---|---|
+| 一个 `UNK` residue | `DECOMP=1 LIG_ASL='res.ptype UNK' run_mmgbsa.sh DIR` | 是 | `Pnnn`、caps、`XLINK_nnn` |
+| pre-resolved peptide chain | `DECOMP=1 LIG_ASL='<chain/component ASL>' run_mmgbsa.sh DIR` | 否 | 输入中已有的 ligand residues |
+| 只要 total MM/GBSA | `run_mmgbsa.sh DIR` | 否 | 不做 residue decomp |
+
+single-UNK 路由需要一个只读的 Synergy-Fragment 目录。toolenv 只在该目录同时有
+`peptide_sequence.py` 和 `monomer_library_nonstandard_segments_simple.csv` 时报告它，
+并通过 `SYNERGY_FRAGMENT_DIR` 传递；不把它声明为所有 MM/GBSA 的无条件依赖，也不修改
+Synergy。缺少 Synergy 只阻塞 single-UNK；pre-resolved 和普通 MM/GBSA 仍可运行。
+
+结果判断按机器可读产物进行：先读
+`<out>/residue_decomp/decomp_manifest.json`，再按 manifest 的
+`paths.summary_csv` 读取 `ligand_decomp_summary.csv`（若当前 runner 使用
+`residue_decomp_summary.csv`，以 manifest 指向的实际路径为准）。不要只看日志猜测状态。
+unknown 名称、临时 `Pnnn`/`XLINK_nnn` 和立体识别不完整是 warning；分组覆盖率低于
+100% 或有 missing/duplicate/overlap 必须视为失败。
+
 ## 分析前必做:查清配体到底是什么
 
 **所有 `LIGAND_ASL` 默认值都可能不适用于你手上的体系**,选错的表现是配体聚类静默
