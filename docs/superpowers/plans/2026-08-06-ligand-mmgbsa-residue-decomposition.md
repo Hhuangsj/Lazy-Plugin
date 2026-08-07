@@ -270,7 +270,7 @@ Run:
 
 ```bash
 python3 -m pytest Synergy-Fragment/test_residue_map.py -q
-/home/huangshengjie/software/2023-4/run python3 Synergy-Fragment/residue_map_cli.py --help
+/home/huangshengjie/software/Schrodinger/2023-4/run python3 Synergy-Fragment/residue_map_cli.py --help
 ```
 
 Expected: pytest PASS and Schrödinger Python prints CLI usage without syntax/import errors.
