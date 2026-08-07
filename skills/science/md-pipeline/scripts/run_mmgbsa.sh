@@ -28,6 +28,7 @@ LIG_ASL="${LIG_ASL:-res.ptype UNK}"
 START="${START:-1000}"     # 起始帧(0-based);后 100ns 起点
 END="${END:-2000}"         # 结束帧
 STEP="${STEP:-20}"         # 每 N 帧抽一帧
+DECOMP_THERMAL_END=$((END + 1))  # decomp 聚合契约把 END 视为包含端点
 # NJOBS = 把帧切成几个 Prime 子作业,且下面 -HOST 用 localhost:$NJOBS 让它们并发。
 # => NJOBS=8 时 8 个子作业同时跑 = 8 核。真正决定并发的是 -HOST 的 ":N",不是 hosts
 #    的 processors(见 README 踩坑记录 7)。要几核就把 NJOBS 设几。
@@ -70,7 +71,7 @@ run_decomp() {
     local thermal_log="$decomp_dir/thermal_mmgbsa.log"
     local aggregate_log="$decomp_dir/prime_mmgbsa_residue_decomp.log"
     local prepare_result="$decomp_dir/prepare_result.json"
-    local analysis_cms analysis_ligand_asl residue_map trj prime_maegz rc
+    local analysis_cms analysis_ligand_asl residue_map trj analysis_trajectory prime_maegz rc
     local -a prepare_args aggregate_args trajectories prime_outputs
 
     mkdir -p "$decomp_dir"
@@ -116,9 +117,24 @@ run_decomp() {
     fi
     trj=${trajectories[0]}
 
+    analysis_trajectory="$(dirname "$analysis_cms")/$(basename "$trj")"
+    if [ "$analysis_trajectory" != "$trj" ]; then
+        if [ -e "$analysis_trajectory" ] || [ -L "$analysis_trajectory" ]; then
+            if [ "$(readlink -f "$analysis_trajectory" 2>/dev/null)" != "$trj" ]; then
+                echo "ERROR: analysis CMS 旁已有冲突轨迹: $analysis_trajectory" >> "$prepare_log"
+                mark_decomp_failed "$manifest" trajectory_link 2 "$prepare_log"
+                return 2
+            fi
+        elif ! ln -s "$trj" "$analysis_trajectory"; then
+            echo "ERROR: 无法为 analysis CMS 链接只读源轨迹: $trj" >> "$prepare_log"
+            mark_decomp_failed "$manifest" trajectory_link 2 "$prepare_log"
+            return 2
+        fi
+    fi
+
     ( cd "$out" && "$SCHRODINGER/run" thermal_mmgbsa.py "$analysis_cms" \
         -lig_asl "$analysis_ligand_asl" -j "$name" \
-        -start_frame "$START" -end_frame "$END" -step_size "$STEP" \
+        -start_frame "$START" -end_frame "$DECOMP_THERMAL_END" -step_size "$STEP" \
         -NJOBS "$NJOBS" -HOST "localhost:$NJOBS" ) >> "$thermal_log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then

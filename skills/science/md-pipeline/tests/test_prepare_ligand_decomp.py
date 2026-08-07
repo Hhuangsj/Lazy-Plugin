@@ -327,6 +327,93 @@ def test_sdf_round_trip_validation_checks_ordered_chemistry_and_bonds():
         )
 
 
+def _aromatic_export_model(sdf_bond_orders):
+    class Atom:
+        def __init__(self, index):
+            self.index = index
+            self.element = "C"
+            self.formal_charge = 0
+
+    class Bond:
+        def __init__(self, left, right, order):
+            self.atom1 = Atom(left)
+            self.atom2 = Atom(right)
+            self.order = order
+
+    class ExportedStructure:
+        def write(self, path, format):
+            assert format == "sd"
+            atom_lines = "\n".join(
+                "{:10.4f}{:10.4f}{:10.4f} C   0  0  0  0  0  0".format(
+                    float(index), 0.0, 0.0
+                )
+                for index in range(6)
+            )
+            bond_lines = "\n".join(
+                "{:3d}{:3d}{:3d}  0  0  0".format(
+                    left, right, order
+                )
+                for (left, right), order in zip(
+                    ((1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 6)),
+                    sdf_bond_orders,
+                )
+            )
+            Path(path).write_text(
+                "benzene\n  Lazy regression\n\n"
+                "  6  6  0  0  0  0            999 V2000\n"
+                + atom_lines
+                + "\n"
+                + bond_lines
+                + "\nM  END\n$$$$\n",
+                encoding="utf-8",
+            )
+
+    class Fsys:
+        def __init__(self):
+            self.bond = [
+                Bond(left, right, order)
+                for (left, right), order in zip(
+                    ((1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (1, 6)),
+                    (2, 1, 2, 1, 2, 1),
+                )
+            ]
+
+        def extract(self, atom_indices):
+            assert atom_indices == [1, 2, 3, 4, 5, 6]
+            return ExportedStructure()
+
+    class Model:
+        atom = {index: Atom(index) for index in range(1, 7)}
+        fsys_ct = Fsys()
+
+    return Model()
+
+
+def test_export_validates_raw_kekule_bonds_before_aromatic_sanitization(
+    tmp_path,
+):
+    molecule = preparation._export_heavy_graph(
+        _aromatic_export_model((2, 1, 2, 1, 2, 1)),
+        [1, 2, 3, 4, 5, 6],
+        tmp_path / "benzene.sdf",
+    )
+
+    assert sorted(
+        bond.GetBondTypeAsDouble() for bond in molecule.GetBonds()
+    ) == [1.5] * 6
+
+
+def test_export_rejects_raw_kekule_drift_hidden_by_aromatic_sanitization(
+    tmp_path,
+):
+    with pytest.raises(PreparationError, match="normalized bonds"):
+        preparation._export_heavy_graph(
+            _aromatic_export_model((1, 2, 1, 2, 1, 2)),
+            [1, 2, 3, 4, 5, 6],
+            tmp_path / "shifted-benzene.sdf",
+        )
+
+
 def test_real_cms_io_rejects_partial_molecule_and_marks_manifest_failed(tmp_path):
     source = _write_two_water_cms(tmp_path / "source.cms")
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -440,6 +527,7 @@ def test_default_adapter_python_is_outside_schrodinger_and_imports_rdkit(
     )
 
     assert result["mode"] == "single_unk"
+    assert Path(result["analysis_cms"]).name == "analysis-out.cms"
     assert _immutable_cms_signature(result["analysis_cms"]) == source_signature
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_digest
     residue_map = json.loads(
@@ -606,6 +694,44 @@ def test_component_lookup_matches_noncontiguous_cms_gid_maps():
     assert components[1].atom[1].chain == "I"
 
 
+def test_component_lookup_uses_standard_cms_concatenation_without_gid_maps():
+    from types import SimpleNamespace
+
+    components = [
+        SimpleNamespace(atom_total=2, atom={1: object(), 2: object()}),
+        SimpleNamespace(atom_total=1, atom={1: object()}),
+    ]
+    cms_model = SimpleNamespace(
+        atom_total=3,
+        fep_ct=None,
+        comp_ct=components,
+        id_maps=[
+            SimpleNamespace(start_gid=None, to_gid=None),
+            SimpleNamespace(start_gid=None, to_gid=None),
+        ],
+    )
+
+    assert preparation._full_system_component_map(cms_model) == {
+        1: (0, 1),
+        2: (0, 2),
+        3: (1, 1),
+    }
+
+
+def test_component_lookup_rejects_concatenation_with_inactive_atoms():
+    from types import SimpleNamespace
+
+    cms_model = SimpleNamespace(
+        atom_total=2,
+        fep_ct=None,
+        comp_ct=[SimpleNamespace(atom_total=3, atom={})],
+        id_maps=[SimpleNamespace(start_gid=None, to_gid=None)],
+    )
+
+    with pytest.raises(PreparationError, match="neither"):
+        preparation._full_system_component_map(cms_model)
+
+
 @pytest.mark.parametrize(
     ("component_gid_maps", "message"),
     [
@@ -693,7 +819,7 @@ def test_output_inside_synergy_is_rejected_before_any_write(tmp_path):
 def test_source_artifact_collision_is_rejected_before_any_write(tmp_path):
     output_dir = tmp_path / "domain"
     output_dir.mkdir()
-    source = _write_two_water_cms(output_dir / "analysis.cms")
+    source = _write_two_water_cms(output_dir / "analysis-out.cms")
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
 
     with pytest.raises(PreparationError, match="path domains"):
@@ -703,7 +829,7 @@ def test_source_artifact_collision_is_rejected_before_any_write(tmp_path):
             output_dir=output_dir,
         )
 
-    assert sorted(path.name for path in output_dir.iterdir()) == ["analysis.cms"]
+    assert sorted(path.name for path in output_dir.iterdir()) == ["analysis-out.cms"]
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_digest
 
 

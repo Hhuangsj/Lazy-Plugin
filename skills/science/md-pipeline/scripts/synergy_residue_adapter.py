@@ -154,7 +154,9 @@ def _recognize_original_backbones(mol, ordered_backbones, detail, identifier,
 
     Atom ownership and names are both derived from ``ordered_backbones`` on
     the input SDF molecule. ``sequence_peptide`` is still reused, but only as
-    a positional fragment/status consistency check after its SMILES round trip.
+    a fragment/status consistency check after its SMILES round trip. Ordinary
+    residues remain positional; crosslinked fragment strings are not compared
+    because their shared bridge is emitted as a separate ownership group.
     """
     original_fragments = [
         residue_fragment_smiles(mol, backbone, detail.sidechains.get(index, ()))
@@ -163,7 +165,18 @@ def _recognize_original_backbones(mol, ordered_backbones, detail, identifier,
     sequence = sequence_peptide(Chem.MolToSmiles(mol, isomericSmiles=True), identifier)
     if sequence.status != "ok" or len(sequence.residues) != len(original_fragments):
         raise AdapterError("Synergy sequence recognition did not match the ordered backbone")
-    if [residue.residue_smiles for residue in sequence.residues] != original_fragments:
+    roundtrip_fragments = [
+        residue.residue_smiles for residue in sequence.residues
+    ]
+    ordinary_indices = [
+        index for index in range(len(original_fragments))
+        if index not in detail.crosslinked
+    ]
+    ordinary_match = all(
+        roundtrip_fragments[index] == original_fragments[index]
+        for index in ordinary_indices
+    )
+    if not ordinary_match:
         raise AdapterError("Synergy round-trip residue fragments do not match input backbone order")
 
     recognized = []

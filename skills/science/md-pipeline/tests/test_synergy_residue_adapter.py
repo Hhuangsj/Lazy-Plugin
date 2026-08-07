@@ -5,6 +5,7 @@ import subprocess
 import sys
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rdkit import Chem
@@ -245,6 +246,69 @@ def test_crosslink_component_is_its_own_group(tmp_path):
     assert sulfur_indices.isdisjoint(groups["P001"]["rdkit_atom_indices"])
     assert set(xlink["connected_group_ids"]) == {"P000", "P001"}
     assert any("XLINK_000" in warning and "crosslinked" in warning for warning in payload["warnings"])
+
+
+def _roundtrip_recognition_inputs(roundtrip_fragments):
+    molecule = Chem.MolFromSmiles("CCC")
+    ordered_backbones = [(0,), (1,), (2,)]
+    detail = SimpleNamespace(sidechains={}, crosslinked={0, 2})
+    residues = [
+        SimpleNamespace(
+            residue_smiles=fragment,
+            status="crosslinked" if index in detail.crosslinked else "unknown",
+            name="",
+        )
+        for index, fragment in enumerate(roundtrip_fragments)
+    ]
+    sequence = SimpleNamespace(status="ok", residues=residues)
+
+    class Identifier:
+        @staticmethod
+        def identify_with_provenance(fragment):
+            return None, None
+
+    def sequence_peptide(smiles, identifier):
+        return sequence
+
+    def residue_fragment_smiles(mol, backbone, sidechain):
+        return ("crosslink-a", "fixed", "crosslink-b")[backbone[0]]
+
+    return (
+        molecule,
+        ordered_backbones,
+        detail,
+        Identifier(),
+        sequence_peptide,
+        residue_fragment_smiles,
+    )
+
+
+def test_crosslinked_roundtrip_accepts_bridge_fragment_reassignment():
+    adapter = _adapter_module()
+
+    sequence, recognized = adapter._recognize_original_backbones(
+        *_roundtrip_recognition_inputs(
+            ("crosslink-expanded", "fixed", "crosslink-trimmed")
+        )
+    )
+
+    assert sequence.status == "ok"
+    assert [item[0] for item in recognized] == [
+        "crosslink-a",
+        "fixed",
+        "crosslink-b",
+    ]
+
+
+def test_roundtrip_rejects_noncrosslinked_positional_fragment_drift():
+    adapter = _adapter_module()
+
+    with pytest.raises(adapter.AdapterError, match="residue fragments"):
+        adapter._recognize_original_backbones(
+            *_roundtrip_recognition_inputs(
+                ("crosslink-expanded", "changed", "crosslink-trimmed")
+            )
+        )
 
 
 def test_free_acid_oxygen_belongs_to_c_terminal_residue(tmp_path):

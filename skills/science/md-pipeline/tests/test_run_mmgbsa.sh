@@ -297,7 +297,7 @@ test_decomp_uses_exact_argv_and_lossless_call_order() {
     assert_argv 4 python3 - "$decomp_dir/prepare_result.json" residue_map
     assert_argv 5 thermal_mmgbsa.py "$decomp_dir/analysis cms.cms" \
         -lig_asl 'chain.name L and res.ptype UNK' -j complex \
-        -start_frame 11 -end_frame 22 -step_size 3 -NJOBS 4 -HOST localhost:4
+        -start_frame 11 -end_frame 23 -step_size 3 -NJOBS 4 -HOST localhost:4
     assert_argv 6 python3 "$SCRIPTS_DIR/prime_mmgbsa_residue_decomp.py" \
         --prime-maegz "$directory/mmgbsa_last100ns/complex-prime-out.maegz" \
         --residue-map "$decomp_dir/residue map.json" --trajectory "$directory/complex_trj" \
@@ -324,6 +324,19 @@ test_decomp_omits_empty_optional_arguments() {
         --start 1000 --end 2000 --step 20 \
         --frame-csv "$decomp_dir/residue_decomp_frames.csv" \
         --summary-csv "$decomp_dir/residue_decomp_summary.csv" --manifest "$decomp_dir/decomp_manifest.json"
+}
+
+test_decomp_links_source_trajectory_beside_analysis_cms() {
+    install_fake_environment
+    local directory decomp_dir linked_trajectory
+    directory=$(make_md_directory)
+    decomp_dir="$directory/mmgbsa_last100ns/residue_decomp"
+    linked_trajectory="$decomp_dir/complex_trj"
+
+    assert_status 0 run_mmgbsa "$directory" env DECOMP=1
+
+    [ -L "$linked_trajectory" ] || fail "analysis trajectory link is missing"
+    assert_eq "$(readlink "$linked_trajectory")" "$directory/complex_trj"
 }
 
 assert_prepare_result_failure() {

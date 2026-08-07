@@ -36,7 +36,7 @@ _OUTPUT_ARTIFACT_NAMES = (
     "atom_index_map.json",
     "ligand_graph.sdf",
     "prepare_result.json",
-    "analysis.cms",
+    "analysis-out.cms",
 )
 _LIBRARY_PATH_VARIABLES = (
     "LD_LIBRARY_PATH",
@@ -248,7 +248,7 @@ def _export_heavy_graph(cms_model, heavy_atom_indices, sdf_path):
     heavy_structure = cms_model.fsys_ct.extract(heavy_atom_indices)
     heavy_structure.write(str(sdf_path), format="sd")
     supplier = Chem.SDMolSupplier(
-        str(sdf_path), removeHs=False, sanitize=True
+        str(sdf_path), removeHs=False, sanitize=False
     )
     records = list(supplier)
     if len(records) != 1:
@@ -256,7 +256,14 @@ def _export_heavy_graph(cms_model, heavy_atom_indices, sdf_path):
             "ligand SDF round trip yielded {} records".format(len(records))
         )
     expected = _source_heavy_graph(cms_model, heavy_atom_indices)
-    return validate_sdf_round_trip(records[0], *expected)
+    molecule = validate_sdf_round_trip(records[0], *expected)
+    try:
+        Chem.SanitizeMol(molecule)
+    except Exception as exc:
+        raise PreparationError(
+            "ligand SDF round trip sanitization failed: {}".format(exc)
+        )
+    return molecule
 
 
 def _pre_resolved_groups(cms_model, ligand_atom_indices):
@@ -428,9 +435,32 @@ def _component_gids(cms_model, ct_index, component):
 
 
 def _full_system_component_map(cms_model):
-    """Match active full-system atoms to component atoms by trajectory gid."""
+    """Match full-system atoms via explicit gids or standard CT concatenation."""
+    id_maps = tuple(cms_model.id_maps)
+    components = tuple(cms_model.comp_ct)
+    standard_concatenation = (
+        len(id_maps) == len(components)
+        and getattr(cms_model, "fep_ct", None) is None
+        and all(
+            getattr(id_map, "to_gid", None) is None
+            and getattr(id_map, "start_gid", None) is None
+            for id_map in id_maps
+        )
+        and cms_model.atom_total == sum(
+            component.atom_total for component in components
+        )
+    )
+    if standard_concatenation:
+        mapping = {}
+        full_system_index = 1
+        for ct_index, component in enumerate(components):
+            for component_index in range(1, component.atom_total + 1):
+                mapping[full_system_index] = (ct_index, component_index)
+                full_system_index += 1
+        return mapping
+
     component_atoms_by_gid = {}
-    for ct_index, component in enumerate(cms_model.comp_ct):
+    for ct_index, component in enumerate(components):
         for component_index, gid in enumerate(
             _component_gids(cms_model, ct_index, component), start=1
         ):
@@ -990,7 +1020,7 @@ def prepare_ligand_decomp(
     atom_index_map_path = output_path / "atom_index_map.json"
     ligand_graph_path = output_path / "ligand_graph.sdf"
     prepare_result_path = output_path / "prepare_result.json"
-    analysis_path = output_path / "analysis.cms"
+    analysis_path = output_path / "analysis-out.cms"
     paths = {
         "source_cms": str(source_path),
         "out_dir": str(output_path),
