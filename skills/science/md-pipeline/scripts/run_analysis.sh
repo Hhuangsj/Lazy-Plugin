@@ -2,7 +2,7 @@
 # @name: run_analysis
 # @description: 对已完成的 MD 目录重跑分析(AutoTRJ 聚类 + SID 交互报告)
 # @requires: schrodinger, automd, conda, conda:md
-# @usage: [LIGAND_ASL=... KEEP_CLEAN=1] run_analysis.sh <md-dir>...
+# @usage: [TRAJECTORY_SOURCE=align ALIGN_CMS=... ALIGN_TRJ=...] run_analysis.sh <md-dir>...
 # run_analysis.sh — 对已完成的 MD 目录跑轨迹分析(AutoTRJ 聚类 + event_analysis 报告)
 # ---------------------------------------------------------------------------
 # 从实战沉淀:关键修正 = 配体 ASL 用 "res.ptype UNK"(AutoMD 建模时配体即 UNK 残基),
@@ -22,6 +22,8 @@
 #   ./run_analysis.sh MD_DIR [MD_DIR ...]
 #   # 覆盖默认参数(环境变量方式):
 #   LIGAND_ASL='res.ptype UNK' FRAMES='1:2001:20' ./run_analysis.sh dir1 dir2
+#   TRAJECTORY_SOURCE=align ./run_analysis.sh dir1
+#   ALIGN_CMS=/path/to/PL_Analysis_ALIGN-out.cms ./run_analysis.sh dir1
 #   KEEP_CLEAN=1 ./run_analysis.sh dir1         # 保留 PL_Analysis_CLEAN 中间产物(默认删)
 #   WITH_MMGBSA=1 ./run_analysis.sh dir1        # 谨慎!见 README 的 MMGBSA 注意事项
 # ---------------------------------------------------------------------------
@@ -29,11 +31,16 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/env.sh"
+# shellcheck disable=SC1091
+source "$HERE/trajectory_source.sh"
 md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
 
 # ===== 可覆盖参数 =====
 LIGAND_ASL="${LIGAND_ASL:-res.ptype UNK}"       # 配体选择(component 2)
 RECEPTOR_ASL="${RECEPTOR_ASL:-protein}"         # 受体选择(component 1)
+TRAJECTORY_SOURCE="${TRAJECTORY_SOURCE:-raw}"   # raw 或已有 Align pair
+ALIGN_CMS="${ALIGN_CMS:-}"                       # 可选:显式 Align CMS
+ALIGN_TRJ="${ALIGN_TRJ:-}"                       # 可选:显式 Align 轨迹目录
 CLEAN_ASL="${CLEAN_ASL:-not solvent and not ions}"  # 清洗:去水去离子
 FRAMES="${FRAMES:-1:2001:20}"                   # 帧范围 start:end:step
 JOB="${JOB:-PL_Analysis}"                       # 作业名前缀
@@ -53,13 +60,19 @@ run_one() {
     echo "==================== $(date '+%F %T') START ${dir##*/} ===================="
     cd "$dir" || return 1
 
-    local trj; trj="$(ls -d ./*_trj 2>/dev/null | head -1)"
-    [ -n "$trj" ] || { echo "ERROR: 找不到 *_trj 轨迹目录,跳过。"; return 1; }
+    select_trajectory_pair "$dir" "$TRAJECTORY_SOURCE" "$ALIGN_CMS" "$ALIGN_TRJ" || return 1
+    local cms="$SELECTED_CMS" trj="$SELECTED_TRJ" base="$SELECTED_BASE"
 
     echo "[$(date '+%F %T')] >>> AutoTRJ  modes='$MODES'  ligand='$LIGAND_ASL'  frames='$FRAMES'"
-    AutoTRJ -i "$trj" -J "$JOB" -M "$MODES" \
-            -R "$RECEPTOR_ASL" -L "$LIGAND_ASL" \
-            -t "$FRAMES" -C "$CLEAN_ASL" -a
+    local -a autotraj_args=(
+        -i "$trj" -J "$JOB" -M "$MODES"
+        -R "$RECEPTOR_ASL" -L "$LIGAND_ASL"
+        -t "$FRAMES"
+    )
+    if [ "$TRAJECTORY_SOURCE" = raw ]; then
+        autotraj_args+=( -C "$CLEAN_ASL" -a )
+    fi
+    AutoTRJ "${autotraj_args[@]}"
     echo "[$(date '+%F %T')] <<< AutoTRJ exit=$?"
 
     # eaf(SID 事件分析文件):P8/P9 等体系 MD 阶段已自带算好的 -out.eaf;
@@ -67,32 +80,35 @@ run_one() {
     #   1) event_analysis.py analyze  -> -in.eaf(分析定义)
     #   2) analyze_simulation.py      -> -out.eaf(真正算轨迹数据,重活)
     #   3) event_analysis.py report   -> analysis/*.pdf
-    local base; base="${dir##*/}"
-    local eaf; eaf="$(ls ./*.eaf 2>/dev/null | grep -v -- '-in.eaf$' | head -1)"
-    if [ -z "$eaf" ]; then
-        local ocms; ocms="$(ls "./${base}-out.cms" 2>/dev/null | head -1)"
-        [ -n "$ocms" ] || ocms="$(ls ./*-out.cms 2>/dev/null | grep -v PL_Analysis | head -1)"
-        local otrj; otrj="$(ls -d "./${base}_trj" 2>/dev/null | head -1)"
-        [ -n "$otrj" ] || otrj="$trj"
-        if [ -n "$ocms" ]; then
-            echo "[$(date '+%F %T')] >>> 无 eaf,现场生成(analyze → analyze_simulation → report)"
-            "$SCHRODINGER/run" event_analysis.py analyze "$ocms" \
+    local eaf report_dir event_prefix
+    if [ "$TRAJECTORY_SOURCE" = align ]; then
+        event_prefix="${base}_event_align"
+        eaf="./${event_prefix}-out.eaf"
+        report_dir="${REPORT_DIR:-analysis_align}"
+        echo "[$(date '+%F %T')] >>> Align event_analysis: regenerate EAF from $cms"
+        "$SCHRODINGER/run" event_analysis.py analyze "$cms" \
+            -prot "$RECEPTOR_ASL" -lig "$LIGAND_ASL" -out "$event_prefix"
+        "$SCHRODINGER/run" analyze_simulation.py "$cms" "$trj" "$eaf" "./${event_prefix}-in.eaf"
+        echo "[$(date '+%F %T')] <<< Align eaf 生成 exit=$?"
+    else
+        eaf="./${base}-out.eaf"
+        report_dir="${REPORT_DIR:-analysis}"
+        if [ ! -f "$eaf" ]; then
+            echo "[$(date '+%F %T')] >>> 无 raw eaf,现场生成(analyze → analyze_simulation → report)"
+            "$SCHRODINGER/run" event_analysis.py analyze "$cms" \
                 -prot "$RECEPTOR_ASL" -lig "$LIGAND_ASL" -out "$base"
-            "$SCHRODINGER/run" analyze_simulation.py "$ocms" "$otrj" "${base}-out.eaf" "${base}-in.eaf"
+            "$SCHRODINGER/run" analyze_simulation.py "$cms" "$trj" "$eaf" "./${base}-in.eaf"
             echo "[$(date '+%F %T')] <<< eaf 生成 exit=$?"
-            eaf="$(ls "./${base}-out.eaf" 2>/dev/null | head -1)"
-        else
-            echo "WARN: 找不到原始 -out.cms,无法生成 eaf。"
         fi
     fi
-    if [ -n "$eaf" ]; then
+    if [ -f "$eaf" ]; then
         echo "[$(date '+%F %T')] >>> event_analysis.py report  ($eaf)"
-        "$SCHRODINGER/run" event_analysis.py report "$eaf" -data -plots -data_dir analysis
+        "$SCHRODINGER/run" event_analysis.py report "$eaf" -data -plots -data_dir "$report_dir"
         echo "[$(date '+%F %T')] <<< event_analysis exit=$?"
     else
         echo "WARN: 找不到可用 .eaf,跳过交互报告。"
     fi
-    if [ "$KEEP_CLEAN" != "1" ]; then
+    if [ "$TRAJECTORY_SOURCE" = raw ] && [ "$KEEP_CLEAN" != "1" ]; then
         # AutoTRJ 的 -a 是异步提交(踩坑 3):聚类作业可能还在读中间轨迹,
         # 等本目录的 $JOB_* 作业全部离开队列再删。
         local waited=0
