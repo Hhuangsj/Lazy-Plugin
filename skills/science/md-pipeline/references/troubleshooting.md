@@ -127,3 +127,16 @@ rm -f <dir>/PL_Analysis_*Cluster_*-out.cms
 bash 是按字节偏移边读边执行的。分析跑到一半时改 `drive.sh`,正在跑的那个进程会从
 错位的偏移继续读,报 `syntax error near unexpected token` 然后死掉 —— 表现为
 「明明语法没问题的脚本却挂了」。要改就先复制一份改副本,或等跑完再改。
+
+### 13. Align 轨迹分析必须使用匹配的 CMS/trj pair
+`TRAJECTORY_SOURCE=align` 只读取成对的 `*_ALIGN-out.cms` 与 `*_ALIGN_trj`。
+目录里有多个 Align 产物时不会猜测，需显式指定：
+```bash
+TRAJECTORY_SOURCE=align \
+ALIGN_CMS=/path/to/PL_Analysis_p2_18351_ALIGN-out.cms \
+ALIGN_TRJ=/path/to/PL_Analysis_p2_18351_ALIGN_trj \
+./run_plip.sh /path/to/XXX-md
+```
+event_analysis 会基于选中的 Align CMS 重新生成 EAF，并把报告放到 `analysis_align/`；
+不要把 raw EAF 直接套到 CLEAN/ALIGN 后可能不同的拓扑上。Align 模式的 PLIP 默认写入
+`plip_last100ns_align/`，raw 模式仍写入 `plip_last100ns/`。

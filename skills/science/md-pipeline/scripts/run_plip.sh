@@ -2,7 +2,7 @@
 # @name: run_plip
 # @description: PLIP 肽-受体相互作用分析,逐帧算类型与残基对占据率(默认后 100ns)
 # @requires: schrodinger, plip, conda, conda:md
-# @usage: LAST_NS=100 JOBS=8 [PEPTIDE_MODE=1 LIGAND_ASL=...] run_plip.sh <md-dir>...
+# @usage: LAST_NS=100 JOBS=8 [TRAJECTORY_SOURCE=align ALIGN_CMS=...] run_plip.sh <md-dir>...
 # run_plip.sh — 对已完成的 MD 目录跑 PLIP 肽–受体相互作用分析(默认后 100ns)
 # ---------------------------------------------------------------------------
 # 从实战沉淀:AutoMD 建模的修饰肽是单个 UNK 残基,PLIP 的 --peptides 肽模式
@@ -30,6 +30,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/env.sh"
+# shellcheck disable=SC1091
+source "$HERE/trajectory_source.sh"
 md_env_check || { echo "环境自检未通过,中止。"; exit 1; }
 command -v plip >/dev/null 2>&1 || { echo "ERROR: 找不到 plip(应在 conda '$MD_CONDA_ENV' 环境里)"; exit 1; }
 
@@ -37,6 +39,9 @@ command -v plip >/dev/null 2>&1 || { echo "ERROR: 找不到 plip(应在 conda '$
 PLIP_PY="${PLIP_PY:-$HERE/plip_interaction_analysis.py}"
 LAST_NS="${LAST_NS:-100}"                         # 只分析最后 N ns(0=全轨迹)
 JOBS="${JOBS:-8}"                                 # 逐帧 PLIP 并行 worker 数
+TRAJECTORY_SOURCE="${TRAJECTORY_SOURCE:-raw}"     # raw 或已有 Align pair
+ALIGN_CMS="${ALIGN_CMS:-}"                         # 可选:显式 Align CMS
+ALIGN_TRJ="${ALIGN_TRJ:-}"                         # 可选:显式 Align 轨迹目录
 KEEP_ASL="${KEEP_ASL:-protein or res.ptype UNK}"  # 导出帧保留:受体+UNK 肽
 LIGAND_CHAIN="${LIGAND_CHAIN:-B}"                 # 把肽重贴到这条链
 LIGAND_ASL="${LIGAND_ASL:-res.ptype UNK}"         # 哪些原子算「肽/配体」(重贴链用)
@@ -44,20 +49,21 @@ LIGAND_ASL="${LIGAND_ASL:-res.ptype UNK}"         # 哪些原子算「肽/配体
 PEPTIDE_MODE="${PEPTIDE_MODE:-0}"
 CHAIN_A="${CHAIN_A:-B}"                           # group A = 肽(配体侧)
 CHAIN_B="${CHAIN_B:-A}"                           # group B = 受体
-OUT_NAME="${OUT_NAME:-plip_last100ns}"            # 输出子目录名
+if [ -z "${OUT_NAME+x}" ]; then
+    if [ "$TRAJECTORY_SOURCE" = align ]; then
+        OUT_NAME="plip_last100ns_align"
+    else
+        OUT_NAME="plip_last100ns"
+    fi
+fi
 THRESHOLD="${THRESHOLD:-20}"                      # 高占据残基对过滤阈值(%)
 
 [ $# -ge 1 ] || { echo "用法: $0 MD_DIR [MD_DIR ...]"; exit 2; }
 
 run_one() {
     local dir; dir="$(cd "$1" 2>/dev/null && pwd)" || { echo "ERROR: 目录无效: $1"; return 1; }
-    # 自动探测主 -out.cms(排除 AutoTRJ 的 PL_Analysis* 与 *_N-out.cms 中间文件);
-    # 不假设「文件夹名 == 文件名」——有的目录二者不一致。
-    local cms; cms="$(ls "$dir"/*-out.cms 2>/dev/null | grep -v PL_Analysis | grep -vE '_[0-9]+-out\.cms$' | head -1)"
-    [ -n "$cms" ] || { echo "ERROR: $dir 下找不到主 -out.cms,跳过。"; return 1; }
-    local name; name="$(basename "$cms")"; name="${name%-out.cms}"
-    local trj="$dir/${name}_trj"
-    [ -d "$trj" ] || { echo "ERROR: 找不到 $trj,跳过。"; return 1; }
+    select_trajectory_pair "$dir" "$TRAJECTORY_SOURCE" "$ALIGN_CMS" "$ALIGN_TRJ" || return 1
+    local cms="$SELECTED_CMS" trj="$SELECTED_TRJ" name="$SELECTED_BASE"
     local out="$dir/$OUT_NAME"
     echo "==================== $(date '+%F %T') PLIP START $name ===================="
     rm -rf "$out"
