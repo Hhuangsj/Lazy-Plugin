@@ -1,0 +1,35 @@
+timezone: Asia/Shanghai
+week_starts_on: monday
+output_dir: ./weekly-reports
+
+sources:
+  git:
+    enabled: true
+    roots:
+      - /absolute/approved/work/path
+    author_emails: []
+  files:
+    enabled: true
+    roots:
+      - /absolute/approved/work/path
+    exclude:
+      - .git
+      - node_modules
+      - vendor
+      - dist
+      - build
+      - .cache
+      - .env
+  activitywatch:
+    enabled: false
+    base_url: http://127.0.0.1:5600
+  codex_tasks:
+    enabled: false
+  notes:
+    enabled: false
+    roots: []
+
+privacy:
+  include_absolute_paths: false
+  include_window_titles: false
+  include_file_contents: false

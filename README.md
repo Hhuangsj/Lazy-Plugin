@@ -48,8 +48,8 @@ export TOOLENV_AMBERTOOLS=/opt/amber22
 
 ```
 skills/<域>/<skill>/     # 一个 skill:SKILL.md + scripts/ + references/ + tests/
-skills/science/md-pipeline/   # 目前唯一的 skill:Desmond MD 运行 + 轨迹分析全流程
-skills/office/                 # 占位域,目前只有 .gitkeep
+skills/science/md-pipeline/   # Desmond MD 运行 + 轨迹分析全流程
+skills/office/weekly-work-report/ # 基于显式白名单生成隐私保护的 YAML 周报
 toolenv/                       # 工具发现与激活层,纯 bash,零依赖,不是 skill
 toolenv/tools.d/                # 每个工具一个 manifest,不分域(pandoc 和 schrodinger 平级)
 .claude-plugin/marketplace.json # marketplace 声明:name + 每个域一个 plugin
